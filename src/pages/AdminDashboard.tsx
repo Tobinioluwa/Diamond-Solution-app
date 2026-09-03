@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { collection, onSnapshot, addDoc, doc, updateDoc, query, orderBy, deleteDoc, where, limit, setDoc, getDoc, increment, writeBatch, getDocs } from 'firebase/firestore';
+import { collection, onSnapshot, addDoc, doc, updateDoc, query, orderBy, deleteDoc, where, limit, setDoc, getDoc, increment, writeBatch, getDocs, getCountFromServer, getAggregateFromServer, sum } from 'firebase/firestore';
 import { db, auth } from '../lib/firebase';
 import { initializeApp, deleteApp } from 'firebase/app';
 import { getAuth as getSecondaryAuth, createUserWithEmailAndPassword, signOut as secondarySignOut } from 'firebase/auth';
@@ -85,82 +85,96 @@ export default function AdminDashboard() {
   });
 
   useEffect(() => {
-    // Basic stats sync
-    const unsubUsers = onSnapshot(collection(db, 'users'), (snap) => {
-      let suspendedCount = 0;
-      snap.docs.forEach(d => {
-        if (d.data().status === 'suspended') suspendedCount++;
-      });
-      setStats(prev => ({ ...prev, totalStudents: snap.size, suspendedCount }));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'users'));
+    // Stats sync — was 5 live listeners reading EVERY document in
+    // users/payments/withdrawals/chats, running the entire time any
+    // admin has the dashboard open on any tab. That cost scales with
+    // total historical data size, not admin activity, and compounds
+    // with every admin session running concurrently.
+    //
+    // Aggregation queries (getCountFromServer / getAggregateFromServer
+    // with sum()) compute counts and sums server-side and bill as a
+    // small fraction of a full collection read, regardless of
+    // collection size. They're one-time reads rather than live
+    // listeners — perfectly fine for a stats/badge display, which
+    // doesn't need per-second freshness. We refresh on a light
+    // interval instead of holding a permanent open connection.
+    let cancelled = false;
 
-    const unsubAffiliates = onSnapshot(query(collection(db, 'affiliates'), where('status', '==', 'pending')), (snap) => {
-      setStats(prev => ({ ...prev, pendingCommissions: snap.size }));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'affiliates'));
+    const loadStats = async () => {
+      try {
+        const [
+          usersCountSnap,
+          suspendedCountSnap,
+          pendingAffiliatesSnap,
+          paymentsNgnSnap,
+          paymentsUsdSnap,
+          withdrawalsPendingSnap,
+          withdrawalsNgnSnap,
+          withdrawalsUsdSnap,
+          chatsUnreadSnap,
+        ] = await Promise.all([
+          getCountFromServer(collection(db, 'users')),
+          getCountFromServer(query(collection(db, 'users'), where('status', '==', 'suspended'))),
+          getCountFromServer(query(collection(db, 'affiliates'), where('status', '==', 'pending'))),
+          getAggregateFromServer(
+            query(collection(db, 'payments'), where('status', '==', 'success'), where('currency', '!=', 'USD')),
+            { total: sum('amount') }
+          ),
+          getAggregateFromServer(
+            query(collection(db, 'payments'), where('status', '==', 'success'), where('currency', '==', 'USD')),
+            { total: sum('amount') }
+          ),
+          getCountFromServer(query(collection(db, 'withdrawals'), where('status', '==', 'pending'))),
+          getAggregateFromServer(
+            query(collection(db, 'withdrawals'), where('status', '==', 'success'), where('currency', '!=', 'USD')),
+            { total: sum('amount') }
+          ),
+          getAggregateFromServer(
+            query(collection(db, 'withdrawals'), where('status', '==', 'success'), where('currency', '==', 'USD')),
+            { total: sum('amount') }
+          ),
+          getAggregateFromServer(collection(db, 'chats'), { total: sum('adminUnreadCount') }),
+        ]);
 
-    const unsubPayments = onSnapshot(collection(db, 'payments'), (snap) => {
-      let totalNGN = 0;
-      let totalUSD = 0;
-      snap.docs.forEach(d => {
-        const data = d.data();
-        if (data.status === 'success') {
-          if (data.currency === 'USD') {
-            totalUSD += data.amount || 0;
-          } else {
-            totalNGN += data.amount || 0;
-          }
-        }
-      });
-      // For display simplicity, let's normalize to a string that shows both
-      const displayTotal = totalUSD > 0 
-        ? `₦${(totalNGN/1000).toFixed(1)}k + $${totalUSD.toFixed(0)}`
-        : `₦${(totalNGN/1000).toLocaleString()}k`;
-      
-      setStats(prev => ({ ...prev, totalRevenue: totalNGN, displayRevenue: displayTotal }));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'payments'));
+        if (cancelled) return;
 
-    const unsubWithdrawals = onSnapshot(collection(db, 'withdrawals'), (snap) => {
-      let pendingCount = 0;
-      let totalNGN = 0;
-      let totalUSD = 0;
-      snap.docs.forEach(d => {
-        const data = d.data();
-        if (data.status === 'pending') {
-          pendingCount++;
-        } else if (data.status === 'success') {
-          const amt = data.amount || 0;
-          if (data.currency === 'USD') {
-            totalUSD += amt;
-          } else {
-            totalNGN += amt;
-          }
-        }
-      });
-      const displayTotalPaidOut = totalUSD > 0
-        ? `₦${totalNGN.toLocaleString()} + $${totalUSD.toLocaleString()}`
-        : `₦${totalNGN.toLocaleString()}`;
+        const totalNGN = paymentsNgnSnap.data().total || 0;
+        const totalUSD = paymentsUsdSnap.data().total || 0;
+        const displayTotal = totalUSD > 0
+          ? `₦${(totalNGN / 1000).toFixed(1)}k + $${totalUSD.toFixed(0)}`
+          : `₦${(totalNGN / 1000).toLocaleString()}k`;
 
-      setStats(prev => ({ 
-        ...prev, 
-        pendingWithdrawals: pendingCount,
-        totalPaidOut: displayTotalPaidOut
-      }));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'withdrawals'));
+        const paidNGN = withdrawalsNgnSnap.data().total || 0;
+        const paidUSD = withdrawalsUsdSnap.data().total || 0;
+        const displayTotalPaidOut = paidUSD > 0
+          ? `₦${paidNGN.toLocaleString()} + $${paidUSD.toLocaleString()}`
+          : `₦${paidNGN.toLocaleString()}`;
 
-    const unsubChats = onSnapshot(collection(db, 'chats'), (snap) => {
-      let totalUnread = 0;
-      snap.docs.forEach(d => {
-        totalUnread += (d.data().adminUnreadCount || 0);
-      });
-      setStats(prev => ({ ...prev, pendingSupports: totalUnread }));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'chats'));
+        setStats(prev => ({
+          ...prev,
+          totalStudents: usersCountSnap.data().count,
+          suspendedCount: suspendedCountSnap.data().count,
+          pendingCommissions: pendingAffiliatesSnap.data().count,
+          totalRevenue: totalNGN,
+          displayRevenue: displayTotal,
+          pendingWithdrawals: withdrawalsPendingSnap.data().count,
+          totalPaidOut: displayTotalPaidOut,
+          pendingSupports: chatsUnreadSnap.data().total || 0,
+        }));
+      } catch (err) {
+        handleFirestoreError(err, OperationType.LIST, 'admin-stats');
+      }
+    };
+
+    loadStats();
+    // Refresh periodically instead of holding a permanent live
+    // connection — 60s keeps badges reasonably fresh without the
+    // cost of a real-time subscription on entire collections.
+    const interval = setInterval(loadStats, 60000);
 
     return () => {
-      unsubUsers();
-      unsubAffiliates();
-      unsubPayments();
-      unsubWithdrawals();
-      unsubChats();
+      cancelled = true;
+      clearInterval(interval);
     };
   }, []);
 
