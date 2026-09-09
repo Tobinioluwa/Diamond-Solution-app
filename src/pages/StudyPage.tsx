@@ -186,64 +186,75 @@ export default function StudyPage() {
       return;
     }
 
-    let unsubQuestions: (() => void) | null = null;
+    // (one-time fetch below replaces the old live listener/unsubscribe pattern)
 
     const setupQuestionsListener = () => {
-      // Only sync questions if verified
+      // Fetch once instead of subscribing live. Question content
+      // essentially never changes mid-quiz for a given student, so a
+      // real-time listener buys nothing here — it only adds an open
+      // connection per student per course, and re-bills every one of
+      // those open connections whenever ANY question in that course
+      // gets edited by an admin, for as long as the listener stays
+      // open. A one-time fetch has the same initial cost with none
+      // of that ongoing multiplier.
       const q = query(collection(db, 'courses', id!, 'content'), orderBy('order', 'asc'));
-      unsubQuestions = onSnapshot(q, async (snapshot) => {
-        const fetchedQuestions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })).filter((q: any) => !q.isDeleted);
-        setQuestions(fetchedQuestions);
-
-        // Load Progress
+      const loadQuestionsOnce = async () => {
         try {
-          const progressRef = doc(db, 'studyProgress', `${user.uid}_${id}`);
-          const progressSnap = await getDoc(progressRef);
-          if (progressSnap.exists()) {
-            const pData = progressSnap.data();
-            const savedAnswers = pData.answers || {};
-            setAnswers(savedAnswers);
+          const snapshot = await getDocs(q);
+          const fetchedQuestions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })).filter((q: any) => !q.isDeleted);
+          setQuestions(fetchedQuestions);
 
-            // Recompute score to be 100% accurate
-            let correctCount = 0;
-            let totalCount = 0;
-            fetchedQuestions.forEach((q: any) => {
-              const ans = savedAnswers[q.id];
-              if (ans && ans.isSubmitted) {
-                totalCount++;
-                const isCorrect = q.type === 'application' ? true : parseInt(ans.selectedAnswer) === q.correctAnswer;
-                if (isCorrect) correctCount++;
+          // Load Progress
+          try {
+            const progressRef = doc(db, 'studyProgress', `${user.uid}_${id}`);
+            const progressSnap = await getDoc(progressRef);
+            if (progressSnap.exists()) {
+              const pData = progressSnap.data();
+              const savedAnswers = pData.answers || {};
+              setAnswers(savedAnswers);
+
+              // Recompute score to be 100% accurate
+              let correctCount = 0;
+              let totalCount = 0;
+              fetchedQuestions.forEach((q: any) => {
+                const ans = savedAnswers[q.id];
+                if (ans && ans.isSubmitted) {
+                  totalCount++;
+                  const isCorrect = q.type === 'application' ? true : parseInt(ans.selectedAnswer) === q.correctAnswer;
+                  if (isCorrect) correctCount++;
+                }
+              });
+              setScore({ correct: correctCount, total: totalCount });
+
+              if (pData.completed) {
+                 setShowResults(true);
+              } else {
+                 const savedIndex = pData.currentIndex || 0;
+                 setCurrentIndex(savedIndex);
+
+                 // Load state for this index
+                 const qId = fetchedQuestions[savedIndex]?.id;
+                 if (qId && savedAnswers[qId]) {
+                   setSelectedAnswer(savedAnswers[qId].selectedAnswer);
+                   setIsSubmitted(savedAnswers[qId].isSubmitted);
+                 } else {
+                   setSelectedAnswer(null);
+                   setIsSubmitted(false);
+                 }
               }
-            });
-            setScore({ correct: correctCount, total: totalCount });
-
-            if (pData.completed) {
-               setShowResults(true);
-            } else {
-               const savedIndex = pData.currentIndex || 0;
-               setCurrentIndex(savedIndex);
-
-               // Load state for this index
-               const qId = fetchedQuestions[savedIndex]?.id;
-               if (qId && savedAnswers[qId]) {
-                 setSelectedAnswer(savedAnswers[qId].selectedAnswer);
-                 setIsSubmitted(savedAnswers[qId].isSubmitted);
-               } else {
-                 setSelectedAnswer(null);
-                 setIsSubmitted(false);
-               }
             }
+          } catch (err) {
+            console.error("Progress fetch error:", err);
           }
-        } catch (err) {
-          console.error("Progress fetch error:", err);
-        }
 
-        setLoading(false);
-      }, (error) => {
-        console.error("Questions snapshot error:", error);
-        handleFirestoreError(error, OperationType.GET, `courses/${id}/content`);
-        setLoading(false);
-      });
+          setLoading(false);
+        } catch (error) {
+          console.error("Questions fetch error:", error);
+          handleFirestoreError(error, OperationType.GET, `courses/${id}/content`);
+          setLoading(false);
+        }
+      };
+      loadQuestionsOnce();
     };
 
     const verifyAccess = async () => {
@@ -331,10 +342,6 @@ export default function StudyPage() {
     };
     
     verifyAccess();
-
-    return () => {
-      if (unsubQuestions) unsubQuestions();
-    };
   }, [id, user, isAdmin, profile]);
 
   useEffect(() => {

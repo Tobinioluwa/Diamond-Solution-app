@@ -1,4 +1,4 @@
-import { doc, getDoc, updateDoc, setDoc } from 'firebase/firestore';
+import { doc, getDoc, updateDoc, setDoc, collection, addDoc } from 'firebase/firestore';
 import { signOut, getIdToken } from 'firebase/auth';
 import { auth, db } from './firebase';
 import { setSessionToken } from '../context/AuthContext';
@@ -55,6 +55,17 @@ export class SessionService {
       lastLogin: new Date().toISOString(),
       deviceInfo
     }, { merge: true }).catch(err => console.warn("Backup user_sessions update failed:", err));
+
+    // One small doc per login, for the admin "visit frequency / peak hours" analytics.
+    // Precompute dateKey/hour at write time so admin queries can filter/aggregate without
+    // scanning full documents.
+    const now = new Date();
+    await addDoc(collection(db, 'login_events'), {
+      uid,
+      timestamp: now.toISOString(),
+      dateKey: now.toISOString().split('T')[0],
+      hour: now.getHours()
+    }).catch(err => console.warn("Login event logging failed:", err));
 
     return sessionToken;
   }

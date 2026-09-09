@@ -46,6 +46,7 @@ export default function Dashboard() {
 
   const activeUserUid = loggedInUser?.uid;
   const activeProfile = loggedInProfile;
+  const weekScholarProfileCacheRef = useRef<Record<string, { displayName: string; department?: string }>>({});
 
   const [quote, setQuote] = useState<any>(null);
   const [stats, setStats] = useState({
@@ -485,37 +486,33 @@ export default function Dashboard() {
       }
 
       try {
-        const userDetailsMap: Record<string, { displayName: string; department?: string }> = {};
-        
-        // Chunk user queries (max 30 per in-query)
-        const chunkSize = 30;
-        const chunks: string[][] = [];
-        for (let i = 0; i < userIds.length; i += chunkSize) {
-          chunks.push(userIds.slice(i, i + chunkSize));
-        }
+        // Only fetch profiles we haven't already resolved - most snapshot updates only
+        // add/change a handful of participants, not the whole weekly cohort.
+        const uncachedIds = userIds.filter(uid => !weekScholarProfileCacheRef.current[uid]);
 
-        await Promise.all(chunks.map(async (chunk) => {
+        if (uncachedIds.length > 0) {
           try {
-            const uQuery = query(collection(db, 'users'), where('__name__', 'in', chunk));
-            const uSnap = await getDocs(uQuery);
-            uSnap.docs.forEach(d => {
-              const uData = d.data();
-              userDetailsMap[d.id] = {
-                displayName: uData.displayName || 'Scholar',
-                department: uData.department || ''
+            const idToken = await loggedInUser?.getIdToken();
+            const res = await axios.post('/api/public-profiles', { userIds: uncachedIds }, {
+              headers: { Authorization: `Bearer ${idToken}` }
+            });
+            (res.data.profiles || []).forEach((p: any) => {
+              weekScholarProfileCacheRef.current[p.id] = {
+                displayName: p.displayName,
+                department: p.department
               };
             });
           } catch (e) {
-            console.warn("Error fetching user details chunk:", e);
+            console.warn("Error fetching scholar profiles:", e);
           }
-        }));
+        }
 
         // Filter scholars by user's department
         const targetClean = userDept.toLowerCase().replace(/[^a-z0-9]/g, '');
 
         const entries = userIds.map(uid => {
           const s = userAggregates[uid];
-          const uInfo = userDetailsMap[uid] || { displayName: 'Scholar', department: '' };
+          const uInfo = weekScholarProfileCacheRef.current[uid] || { displayName: 'Scholar', department: '' };
           // Points Formula: (Attempted * 2) + (Correct * 0.5)
           const points = (s.attempted * 2) + (s.correct * 0.5);
           const accuracy = s.attempted > 0 ? Math.round((s.correct / s.attempted) * 100) : 0;

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { collection, onSnapshot, addDoc, doc, updateDoc, query, orderBy, deleteDoc, where, limit, setDoc, getDoc, increment, writeBatch, getDocs } from 'firebase/firestore';
+import { collection, onSnapshot, addDoc, doc, updateDoc, query, orderBy, deleteDoc, where, limit, setDoc, getDoc, increment, writeBatch, getDocs, getCountFromServer, getAggregateFromServer, sum } from 'firebase/firestore';
 import { db, auth } from '../lib/firebase';
 import { initializeApp, deleteApp } from 'firebase/app';
 import { getAuth as getSecondaryAuth, createUserWithEmailAndPassword, signOut as secondarySignOut } from 'firebase/auth';
@@ -10,7 +10,7 @@ import {
   BarChart2, Building2, FileText, Bell, Quote, LogOut, Search, 
   Filter, Plus, Edit3, Trash2, CheckCircle2, AlertCircle, XCircle, ArrowRight, ArrowLeft,
   Layers, X, Download, MessageCircle, Check, Target, ShieldAlert, Clock, Menu, BookOpen, RotateCcw,
-  Image as ImageIcon, Upload, Camera
+  Image as ImageIcon, Upload, Camera, TrendingUp
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { downloadCSV } from '../lib/csvUtils';
@@ -85,82 +85,96 @@ export default function AdminDashboard() {
   });
 
   useEffect(() => {
-    // Basic stats sync
-    const unsubUsers = onSnapshot(collection(db, 'users'), (snap) => {
-      let suspendedCount = 0;
-      snap.docs.forEach(d => {
-        if (d.data().status === 'suspended') suspendedCount++;
-      });
-      setStats(prev => ({ ...prev, totalStudents: snap.size, suspendedCount }));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'users'));
+    // Stats sync — was 5 live listeners reading EVERY document in
+    // users/payments/withdrawals/chats, running the entire time any
+    // admin has the dashboard open on any tab. That cost scales with
+    // total historical data size, not admin activity, and compounds
+    // with every admin session running concurrently.
+    //
+    // Aggregation queries (getCountFromServer / getAggregateFromServer
+    // with sum()) compute counts and sums server-side and bill as a
+    // small fraction of a full collection read, regardless of
+    // collection size. They're one-time reads rather than live
+    // listeners — perfectly fine for a stats/badge display, which
+    // doesn't need per-second freshness. We refresh on a light
+    // interval instead of holding a permanent open connection.
+    let cancelled = false;
 
-    const unsubAffiliates = onSnapshot(query(collection(db, 'affiliates'), where('status', '==', 'pending')), (snap) => {
-      setStats(prev => ({ ...prev, pendingCommissions: snap.size }));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'affiliates'));
+    const loadStats = async () => {
+      try {
+        const [
+          usersCountSnap,
+          suspendedCountSnap,
+          pendingAffiliatesSnap,
+          paymentsNgnSnap,
+          paymentsUsdSnap,
+          withdrawalsPendingSnap,
+          withdrawalsNgnSnap,
+          withdrawalsUsdSnap,
+          chatsUnreadSnap,
+        ] = await Promise.all([
+          getCountFromServer(collection(db, 'users')),
+          getCountFromServer(query(collection(db, 'users'), where('status', '==', 'suspended'))),
+          getCountFromServer(query(collection(db, 'affiliates'), where('status', '==', 'pending'))),
+          getAggregateFromServer(
+            query(collection(db, 'payments'), where('status', '==', 'success'), where('currency', '!=', 'USD')),
+            { total: sum('amount') }
+          ),
+          getAggregateFromServer(
+            query(collection(db, 'payments'), where('status', '==', 'success'), where('currency', '==', 'USD')),
+            { total: sum('amount') }
+          ),
+          getCountFromServer(query(collection(db, 'withdrawals'), where('status', '==', 'pending'))),
+          getAggregateFromServer(
+            query(collection(db, 'withdrawals'), where('status', '==', 'success'), where('currency', '!=', 'USD')),
+            { total: sum('amount') }
+          ),
+          getAggregateFromServer(
+            query(collection(db, 'withdrawals'), where('status', '==', 'success'), where('currency', '==', 'USD')),
+            { total: sum('amount') }
+          ),
+          getAggregateFromServer(collection(db, 'chats'), { total: sum('adminUnreadCount') }),
+        ]);
 
-    const unsubPayments = onSnapshot(collection(db, 'payments'), (snap) => {
-      let totalNGN = 0;
-      let totalUSD = 0;
-      snap.docs.forEach(d => {
-        const data = d.data();
-        if (data.status === 'success') {
-          if (data.currency === 'USD') {
-            totalUSD += data.amount || 0;
-          } else {
-            totalNGN += data.amount || 0;
-          }
-        }
-      });
-      // For display simplicity, let's normalize to a string that shows both
-      const displayTotal = totalUSD > 0 
-        ? `₦${(totalNGN/1000).toFixed(1)}k + $${totalUSD.toFixed(0)}`
-        : `₦${(totalNGN/1000).toLocaleString()}k`;
-      
-      setStats(prev => ({ ...prev, totalRevenue: totalNGN, displayRevenue: displayTotal }));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'payments'));
+        if (cancelled) return;
 
-    const unsubWithdrawals = onSnapshot(collection(db, 'withdrawals'), (snap) => {
-      let pendingCount = 0;
-      let totalNGN = 0;
-      let totalUSD = 0;
-      snap.docs.forEach(d => {
-        const data = d.data();
-        if (data.status === 'pending') {
-          pendingCount++;
-        } else if (data.status === 'success') {
-          const amt = data.amount || 0;
-          if (data.currency === 'USD') {
-            totalUSD += amt;
-          } else {
-            totalNGN += amt;
-          }
-        }
-      });
-      const displayTotalPaidOut = totalUSD > 0
-        ? `₦${totalNGN.toLocaleString()} + $${totalUSD.toLocaleString()}`
-        : `₦${totalNGN.toLocaleString()}`;
+        const totalNGN = paymentsNgnSnap.data().total || 0;
+        const totalUSD = paymentsUsdSnap.data().total || 0;
+        const displayTotal = totalUSD > 0
+          ? `₦${(totalNGN / 1000).toFixed(1)}k + $${totalUSD.toFixed(0)}`
+          : `₦${(totalNGN / 1000).toLocaleString()}k`;
 
-      setStats(prev => ({ 
-        ...prev, 
-        pendingWithdrawals: pendingCount,
-        totalPaidOut: displayTotalPaidOut
-      }));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'withdrawals'));
+        const paidNGN = withdrawalsNgnSnap.data().total || 0;
+        const paidUSD = withdrawalsUsdSnap.data().total || 0;
+        const displayTotalPaidOut = paidUSD > 0
+          ? `₦${paidNGN.toLocaleString()} + $${paidUSD.toLocaleString()}`
+          : `₦${paidNGN.toLocaleString()}`;
 
-    const unsubChats = onSnapshot(collection(db, 'chats'), (snap) => {
-      let totalUnread = 0;
-      snap.docs.forEach(d => {
-        totalUnread += (d.data().adminUnreadCount || 0);
-      });
-      setStats(prev => ({ ...prev, pendingSupports: totalUnread }));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'chats'));
+        setStats(prev => ({
+          ...prev,
+          totalStudents: usersCountSnap.data().count,
+          suspendedCount: suspendedCountSnap.data().count,
+          pendingCommissions: pendingAffiliatesSnap.data().count,
+          totalRevenue: totalNGN,
+          displayRevenue: displayTotal,
+          pendingWithdrawals: withdrawalsPendingSnap.data().count,
+          totalPaidOut: displayTotalPaidOut,
+          pendingSupports: chatsUnreadSnap.data().total || 0,
+        }));
+      } catch (err) {
+        handleFirestoreError(err, OperationType.LIST, 'admin-stats');
+      }
+    };
+
+    loadStats();
+    // Refresh periodically instead of holding a permanent live
+    // connection — 60s keeps badges reasonably fresh without the
+    // cost of a real-time subscription on entire collections.
+    const interval = setInterval(loadStats, 60000);
 
     return () => {
-      unsubUsers();
-      unsubAffiliates();
-      unsubPayments();
-      unsubWithdrawals();
-      unsubChats();
+      cancelled = true;
+      clearInterval(interval);
     };
   }, []);
 
@@ -990,12 +1004,48 @@ function UsersManager({ requestClearance }: { requestClearance: any }) {
                       </div>
                     </td>
                     <td className="px-6 py-5">
-                      <span className={cn(
-                        "px-3 py-1 rounded-lg text-[9px] font-black uppercase tracking-[0.2em] border",
-                        u.role === 'admin' ? "bg-[#EEF3FF] text-[#2563EB] border-[#2563EB]/40 shadow-sm" : "bg-slate-100 text-slate-600 border-slate-200"
-                      )}>
-                        {u.role}
-                      </span>
+                      <select
+                        value={u.role || 'student'}
+                        disabled={u.id === auth.currentUser?.uid}
+                        onChange={(e) => {
+                          const newRole = e.target.value;
+                          const prevRole = u.role || 'student';
+                          if (newRole === prevRole) return;
+                          if (!window.confirm(`Change ${u.displayName || u.email}'s role from "${prevRole}" to "${newRole}"?`)) return;
+                          requestClearance(u.id, 'update', async () => {
+                            try {
+                              await updateDoc(doc(db, 'users', u.id), {
+                                role: newRole,
+                                updatedAt: new Date().toISOString()
+                              });
+
+                              if (newRole === 'admin') {
+                                await setDoc(doc(db, 'admins', u.id), {
+                                  uid: u.id,
+                                  email: u.email,
+                                  displayName: u.displayName || 'Scholar',
+                                  createdAt: new Date().toISOString()
+                                });
+                              } else if (prevRole === 'admin') {
+                                await deleteDoc(doc(db, 'admins', u.id));
+                              }
+
+                              alert(`Role successfully updated to ${newRole.toUpperCase()}.`);
+                            } catch (err: any) {
+                              alert(`FAILED TO UPDATE ROLE: ${err.message || err}`);
+                              throw err;
+                            }
+                          });
+                        }}
+                        className={cn(
+                          "px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-[0.15em] border outline-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed",
+                          u.role === 'admin' ? "bg-[#EEF3FF] text-[#2563EB] border-[#2563EB]/40 shadow-sm" : "bg-slate-100 text-slate-600 border-slate-200"
+                        )}
+                      >
+                        <option value="student">student</option>
+                        <option value="moderator">moderator</option>
+                        <option value="admin">admin</option>
+                      </select>
                     </td>
                     <td className="px-6 py-5">
                       <span className={cn(
@@ -1048,6 +1098,29 @@ function UsersManager({ requestClearance }: { requestClearance: any }) {
                           )}
                         >
                           {isSuspended ? 'Unsuspend' : 'Suspend'}
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            if (u.id === auth.currentUser?.uid) return;
+                            if (!window.confirm(`Permanently delete ${u.displayName || u.email}? This removes their login and all their data. This cannot be undone.`)) return;
+                            requestClearance(u.id, 'delete', async () => {
+                              try {
+                                const idToken = await auth.currentUser?.getIdToken();
+                                await axios.post('/api/admin/delete-user', { targetUserId: u.id }, {
+                                  headers: { Authorization: `Bearer ${idToken}` }
+                                });
+                                alert('User permanently deleted.');
+                              } catch (err: any) {
+                                alert(`FAILED TO DELETE USER: ${err.response?.data?.error || err.message || err}`);
+                                throw err;
+                              }
+                            });
+                          }}
+                          disabled={u.id === auth.currentUser?.uid}
+                          className="bg-red-500/10 text-red-600 border border-red-500/20 px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-red-500 hover:text-white transition-all active:scale-95 shadow-sm disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-red-500/10 disabled:hover:text-red-600"
+                        >
+                          Delete
                         </button>
                       </div>
                     </td>
@@ -1467,6 +1540,106 @@ function AnalyticsDashboard({ stats }: { stats: any }) {
   const [revenueData, setRevenueData] = useState<number[]>(new Array(12).fill(0));
   const [payoutData, setPayoutData] = useState<number[]>(new Array(12).fill(0));
 
+  // Engagement analytics (most active users / visit frequency / peak hours).
+  // Deliberately a one-time fetch on load + manual refresh, NOT a live listener - the
+  // read-amplification bug we fixed on the leaderboard came from exactly that pattern.
+  const [engagementPeriod, setEngagementPeriod] = useState<7 | 30 | 90>(30);
+  const [engagementLoading, setEngagementLoading] = useState(true);
+  const [engagementUpdatedAt, setEngagementUpdatedAt] = useState<Date | null>(null);
+  const [mostActiveUsers, setMostActiveUsers] = useState<Array<{
+    uid: string; displayName: string; department: string; attempted: number; correct: number; studyDuration: number;
+  }>>([]);
+  const [visitsByDay, setVisitsByDay] = useState<Array<{ date: string; count: number }>>([]);
+  const [visitsByHour, setVisitsByHour] = useState<number[]>(new Array(24).fill(0));
+  const [totalVisits, setTotalVisits] = useState(0);
+  const [uniqueVisitors, setUniqueVisitors] = useState(0);
+
+  const loadEngagementAnalytics = async () => {
+    setEngagementLoading(true);
+    try {
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - (engagementPeriod - 1));
+      const cutoffKey = cutoff.toISOString().split('T')[0];
+
+      // Most active users: aggregate dailyPractice (already written per study session) over the window
+      const practiceSnap = await getDocs(query(collection(db, 'dailyPractice'), where('date', '>=', cutoffKey)));
+      const userAgg: Record<string, { attempted: number; correct: number; studyDuration: number }> = {};
+      practiceSnap.docs.forEach(d => {
+        const data = d.data();
+        const uid = data.userId;
+        if (!uid) return;
+        if (!userAgg[uid]) userAgg[uid] = { attempted: 0, correct: 0, studyDuration: 0 };
+        userAgg[uid].attempted += data.attempted || 0;
+        userAgg[uid].correct += data.correct || 0;
+        userAgg[uid].studyDuration += data.studyDuration || 0;
+      });
+
+      const topUids = Object.entries(userAgg)
+        .sort((a, b) => b[1].attempted - a[1].attempted)
+        .slice(0, 10)
+        .map(([uid]) => uid);
+
+      const profileMap: Record<string, { displayName: string; department?: string }> = {};
+      if (topUids.length > 0) {
+        try {
+          const idToken = await auth.currentUser?.getIdToken();
+          const res = await axios.post('/api/public-profiles', { userIds: topUids }, {
+            headers: { Authorization: `Bearer ${idToken}` }
+          });
+          (res.data.profiles || []).forEach((p: any) => {
+            profileMap[p.id] = { displayName: p.displayName, department: p.department };
+          });
+        } catch (e) {
+          console.warn('Error fetching top-user profiles:', e);
+        }
+      }
+
+      setMostActiveUsers(topUids.map(uid => ({
+        uid,
+        displayName: profileMap[uid]?.displayName || 'Scholar',
+        department: profileMap[uid]?.department || '—',
+        attempted: userAgg[uid].attempted,
+        correct: userAgg[uid].correct,
+        studyDuration: userAgg[uid].studyDuration
+      })));
+
+      // Visit frequency & peak hours: login_events written once per sign-in (see SessionService)
+      const visitsSnap = await getDocs(query(collection(db, 'login_events'), where('dateKey', '>=', cutoffKey)));
+      const dayBuckets: Record<string, number> = {};
+      for (let i = 0; i < engagementPeriod; i++) {
+        const d = new Date();
+        d.setDate(d.getDate() - i);
+        dayBuckets[d.toISOString().split('T')[0]] = 0;
+      }
+      const hourBuckets = new Array(24).fill(0);
+      const visitors = new Set<string>();
+
+      visitsSnap.docs.forEach(d => {
+        const data = d.data();
+        if (typeof data.dateKey === 'string' && data.dateKey in dayBuckets) {
+          dayBuckets[data.dateKey] += 1;
+        }
+        if (typeof data.hour === 'number' && data.hour >= 0 && data.hour < 24) {
+          hourBuckets[data.hour] += 1;
+        }
+        if (data.uid) visitors.add(data.uid);
+      });
+
+      setVisitsByDay(Object.entries(dayBuckets).sort((a, b) => a[0].localeCompare(b[0])).map(([date, count]) => ({ date, count })));
+      setVisitsByHour(hourBuckets);
+      setTotalVisits(visitsSnap.size);
+      setUniqueVisitors(visitors.size);
+      setEngagementUpdatedAt(new Date());
+    } catch (e) {
+      console.warn('Error loading engagement analytics:', e);
+    }
+    setEngagementLoading(false);
+  };
+
+  useEffect(() => {
+    loadEngagementAnalytics();
+  }, [engagementPeriod]);
+
   useEffect(() => {
     // Process Revenue History
     const unsubPayments = onSnapshot(collection(db, 'payments'), (snap) => {
@@ -1548,6 +1721,133 @@ function AnalyticsDashboard({ stats }: { stats: any }) {
               </div>
             ))}
           </div>
+        </div>
+      </div>
+
+      {/* Engagement Analytics: most active users, visit frequency, peak hours */}
+      <div className="flex flex-wrap items-center gap-4">
+        <h3 className="font-serif font-black text-lg tracking-tight uppercase tracking-[0.2em] text-[#2563EB]">Engagement Analytics</h3>
+        <div className="flex items-center gap-2 ml-auto">
+          {([7, 30, 90] as const).map(days => (
+            <button
+              key={days}
+              onClick={() => setEngagementPeriod(days)}
+              className={cn(
+                "px-4 py-2 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all border",
+                engagementPeriod === days
+                  ? "bg-[#2563EB] text-white border-[#2563EB] shadow-sm"
+                  : "bg-white text-slate-500 border-[#D8E3FF] hover:border-[#2563EB]/40"
+              )}
+            >
+              {days}d
+            </button>
+          ))}
+          <button
+            onClick={loadEngagementAnalytics}
+            disabled={engagementLoading}
+            className="px-4 py-2 rounded-xl text-[11px] font-black uppercase tracking-widest bg-white text-[#2563EB] border border-[#D8E3FF] hover:border-[#2563EB] transition-all disabled:opacity-50"
+          >
+            {engagementLoading ? 'Loading…' : 'Refresh'}
+          </button>
+        </div>
+        {engagementUpdatedAt && (
+          <div className="w-full text-[10px] text-slate-400 font-mono">
+            Snapshot as of {format(engagementUpdatedAt, 'MMM d, HH:mm')} — not live, click Refresh for the latest.
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <StatCard label="Total Visits" value={totalVisits.toLocaleString()} sub={`Last ${engagementPeriod} days`} colorClass="text-[#2563EB]" />
+        <StatCard label="Unique Visitors" value={uniqueVisitors.toLocaleString()} sub={`Last ${engagementPeriod} days`} colorClass="text-emerald-600" />
+        <StatCard label="Avg Visits / Visitor" value={uniqueVisitors > 0 ? (totalVisits / uniqueVisitors).toFixed(1) : '0'} sub="Return frequency" colorClass="text-[#2563EB]" />
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="bg-white border border-[#D8E3FF] rounded-2xl p-8 shadow-sm relative overflow-hidden">
+          <div className="absolute top-0 right-0 p-4 opacity-5 text-slate-900"><TrendingUp className="w-20 h-20" /></div>
+          <h3 className="font-serif font-black text-lg mb-8 tracking-tight uppercase tracking-[0.2em] text-[#2563EB]">Page Visits Over Time</h3>
+          {visitsByDay.length === 0 ? (
+            <div className="h-64 flex items-center justify-center text-slate-400 text-sm italic">No visit data yet</div>
+          ) : (
+            <div className="h-64 flex items-end justify-between gap-[2px] overflow-x-auto">
+              {visitsByDay.map((v) => {
+                const max = Math.max(...visitsByDay.map(x => x.count), 1);
+                return (
+                  <div key={v.date} className="flex-1 min-w-[4px] flex flex-col items-center gap-2 group relative">
+                    <div
+                      title={`${v.date}: ${v.count} visit(s)`}
+                      className="w-full bg-gradient-to-t from-[#2563EB]/10 via-[#2563EB]/40 to-[#2563EB] rounded-t-md transition-all duration-500 group-hover:brightness-125"
+                      style={{ height: `${(v.count / max) * 100}%`, minHeight: v.count > 0 ? '4px' : '1px' }}
+                    ></div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="bg-white border border-[#D8E3FF] rounded-2xl p-8 shadow-sm relative overflow-hidden">
+          <div className="absolute top-0 right-0 p-4 opacity-5 text-slate-900"><Clock className="w-20 h-20" /></div>
+          <h3 className="font-serif font-black text-lg mb-8 tracking-tight uppercase tracking-[0.2em] text-[#2563EB]">Peak Visit Hours (local time)</h3>
+          <div className="h-64 flex items-end justify-between gap-1">
+            {visitsByHour.map((count, hour) => {
+              const max = Math.max(...visitsByHour, 1);
+              return (
+                <div key={hour} className="flex-1 flex flex-col items-center gap-2 group">
+                  <div
+                    title={`${hour}:00 — ${count} visit(s)`}
+                    className="w-full bg-gradient-to-t from-emerald-500/10 via-emerald-500/40 to-emerald-500 rounded-t-md transition-all duration-500 group-hover:brightness-125"
+                    style={{ height: `${(count / max) * 100}%`, minHeight: count > 0 ? '4px' : '1px' }}
+                  ></div>
+                  {hour % 3 === 0 && (
+                    <div className="text-[8px] font-black text-slate-400 font-mono">{hour}h</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white border border-[#D8E3FF] rounded-2xl overflow-hidden shadow-sm">
+        <div className="px-8 py-6 border-b border-[#D8E3FF]">
+          <h3 className="font-serif font-black text-lg tracking-tight uppercase tracking-[0.2em] text-[#2563EB]">Most Active Scholars</h3>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
+            <thead>
+              <tr className="bg-[#EEF3FF]/50 border-b border-[#D8E3FF]">
+                <th className="px-6 py-4 text-[11px] font-bold text-slate-500 uppercase tracking-widest font-mono">Rank</th>
+                <th className="px-6 py-4 text-[11px] font-bold text-slate-500 uppercase tracking-widest font-mono">Scholar</th>
+                <th className="px-6 py-4 text-[11px] font-bold text-slate-500 uppercase tracking-widest font-mono">Department</th>
+                <th className="px-6 py-4 text-[11px] font-bold text-slate-500 uppercase tracking-widest font-mono">Attempted</th>
+                <th className="px-6 py-4 text-[11px] font-bold text-slate-500 uppercase tracking-widest font-mono">Accuracy</th>
+                <th className="px-6 py-4 text-[11px] font-bold text-slate-500 uppercase tracking-widest font-mono">Study Time</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#D8E3FF]">
+              {mostActiveUsers.length === 0 ? (
+                <tr><td colSpan={6} className="px-6 py-16 text-center text-slate-400 italic">{engagementLoading ? 'Loading…' : 'No study activity in this window'}</td></tr>
+              ) : (
+                mostActiveUsers.map((u, i) => {
+                  const accuracy = u.attempted > 0 ? Math.round((u.correct / u.attempted) * 100) : 0;
+                  const hours = Math.floor(u.studyDuration / 3600);
+                  const mins = Math.floor((u.studyDuration % 3600) / 60);
+                  return (
+                    <tr key={u.uid} className="hover:bg-[#EEF3FF]/40 transition-all">
+                      <td className="px-6 py-4 text-[13px] font-black text-slate-400 font-mono">#{i + 1}</td>
+                      <td className="px-6 py-4 text-[14px] font-bold text-slate-900">{u.displayName}</td>
+                      <td className="px-6 py-4 text-[12px] text-slate-500 uppercase tracking-wider">{u.department}</td>
+                      <td className="px-6 py-4 text-[13px] font-mono text-slate-700">{u.attempted}</td>
+                      <td className="px-6 py-4 text-[13px] font-mono text-slate-700">{accuracy}%</td>
+                      <td className="px-6 py-4 text-[13px] font-mono text-slate-700">{hours}h {mins}m</td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>
