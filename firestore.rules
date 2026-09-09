@@ -143,10 +143,12 @@ service cloud.firestore {
         (!('balance' in incoming()) || incoming().balance == existing().balance) &&
         (!('email' in incoming()) || incoming().email == existing().email) &&
         (!('status' in incoming()) || incoming().status == existing().status || incoming().status in ['active', 'device_blocked', 'suspended']) &&
-        (!('affiliateStatus' in existing()) || 
-         incoming().affiliateStatus == existing().affiliateStatus || 
+        (!('affiliateStatus' in existing()) ||
+         incoming().affiliateStatus == existing().affiliateStatus ||
          incoming().affiliateStatus in ['none', 'pending', 'active'])
       ) || isAdmin();
+
+      allow delete: if isAdmin();
     }
 
     // --- Payments ---

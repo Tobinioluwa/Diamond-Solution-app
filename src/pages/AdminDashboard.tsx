@@ -1004,12 +1004,48 @@ function UsersManager({ requestClearance }: { requestClearance: any }) {
                       </div>
                     </td>
                     <td className="px-6 py-5">
-                      <span className={cn(
-                        "px-3 py-1 rounded-lg text-[9px] font-black uppercase tracking-[0.2em] border",
-                        u.role === 'admin' ? "bg-[#EEF3FF] text-[#2563EB] border-[#2563EB]/40 shadow-sm" : "bg-slate-100 text-slate-600 border-slate-200"
-                      )}>
-                        {u.role}
-                      </span>
+                      <select
+                        value={u.role || 'student'}
+                        disabled={u.id === auth.currentUser?.uid}
+                        onChange={(e) => {
+                          const newRole = e.target.value;
+                          const prevRole = u.role || 'student';
+                          if (newRole === prevRole) return;
+                          if (!window.confirm(`Change ${u.displayName || u.email}'s role from "${prevRole}" to "${newRole}"?`)) return;
+                          requestClearance(u.id, 'update', async () => {
+                            try {
+                              await updateDoc(doc(db, 'users', u.id), {
+                                role: newRole,
+                                updatedAt: new Date().toISOString()
+                              });
+
+                              if (newRole === 'admin') {
+                                await setDoc(doc(db, 'admins', u.id), {
+                                  uid: u.id,
+                                  email: u.email,
+                                  displayName: u.displayName || 'Scholar',
+                                  createdAt: new Date().toISOString()
+                                });
+                              } else if (prevRole === 'admin') {
+                                await deleteDoc(doc(db, 'admins', u.id));
+                              }
+
+                              alert(`Role successfully updated to ${newRole.toUpperCase()}.`);
+                            } catch (err: any) {
+                              alert(`FAILED TO UPDATE ROLE: ${err.message || err}`);
+                              throw err;
+                            }
+                          });
+                        }}
+                        className={cn(
+                          "px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-[0.15em] border outline-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed",
+                          u.role === 'admin' ? "bg-[#EEF3FF] text-[#2563EB] border-[#2563EB]/40 shadow-sm" : "bg-slate-100 text-slate-600 border-slate-200"
+                        )}
+                      >
+                        <option value="student">student</option>
+                        <option value="moderator">moderator</option>
+                        <option value="admin">admin</option>
+                      </select>
                     </td>
                     <td className="px-6 py-5">
                       <span className={cn(
@@ -1062,6 +1098,29 @@ function UsersManager({ requestClearance }: { requestClearance: any }) {
                           )}
                         >
                           {isSuspended ? 'Unsuspend' : 'Suspend'}
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            if (u.id === auth.currentUser?.uid) return;
+                            if (!window.confirm(`Permanently delete ${u.displayName || u.email}? This removes their login and all their data. This cannot be undone.`)) return;
+                            requestClearance(u.id, 'delete', async () => {
+                              try {
+                                const idToken = await auth.currentUser?.getIdToken();
+                                await axios.post('/api/admin/delete-user', { targetUserId: u.id }, {
+                                  headers: { Authorization: `Bearer ${idToken}` }
+                                });
+                                alert('User permanently deleted.');
+                              } catch (err: any) {
+                                alert(`FAILED TO DELETE USER: ${err.response?.data?.error || err.message || err}`);
+                                throw err;
+                              }
+                            });
+                          }}
+                          disabled={u.id === auth.currentUser?.uid}
+                          className="bg-red-500/10 text-red-600 border border-red-500/20 px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-red-500 hover:text-white transition-all active:scale-95 shadow-sm disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-red-500/10 disabled:hover:text-red-600"
+                        >
+                          Delete
                         </button>
                       </div>
                     </td>

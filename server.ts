@@ -520,6 +520,70 @@ async function startServer() {
     }
   });
 
+  // Admin: permanently delete a user (Auth account + all Firestore records)
+  app.post("/api/admin/delete-user", verifyFirebaseToken, async (req, res) => {
+    try {
+      const { targetUserId } = z.object({
+        targetUserId: z.string().min(1, "targetUserId is required")
+      }).parse(req.body);
+
+      const callerUid = (req as any).uid;
+
+      const isAdminUser = await checkIsAdmin(callerUid);
+      if (!isAdminUser) {
+        return res.status(403).json({ error: "Forbidden: Admin privileges are required to delete users." });
+      }
+
+      if (targetUserId === callerUid) {
+        return res.status(400).json({ error: "You cannot delete your own account from the admin panel." });
+      }
+
+      const db = await getFirestore();
+      const targetDoc = await db.collection("users").doc(targetUserId).get();
+      const targetEmail = targetDoc.exists ? targetDoc.data()?.email : undefined;
+
+      if (targetEmail && String(targetEmail).toLowerCase() === "peteradekunle923@gmail.com") {
+        return res.status(403).json({ error: "This account cannot be deleted." });
+      }
+
+      // Remove the Firebase Auth account so the credentials stop working immediately
+      try {
+        await getAuth().deleteUser(targetUserId);
+      } catch (authErr: any) {
+        if (authErr.code !== "auth/user-not-found") {
+          console.error("[Admin Delete User] Auth deletion failed:", authErr.message);
+          throw authErr;
+        }
+      }
+
+      // Remove Firestore records
+      const batch = db.batch();
+      batch.delete(db.collection("users").doc(targetUserId));
+      batch.delete(db.collection("admins").doc(targetUserId));
+      await batch.commit();
+
+      try {
+        await db.collection("system_logs").add({
+          purpose: "Admin User Deletion",
+          targetId: targetUserId,
+          targetEmail: targetEmail || null,
+          performedBy: callerUid,
+          createdAt: new Date().toISOString()
+        });
+      } catch (logErr) {
+        // Non-fatal: deletion already succeeded, logging is best-effort
+      }
+
+      res.json({ success: true, message: "User permanently deleted." });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.issues[0].message });
+      }
+      console.error("[Admin Delete User] Error:", error.message);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Translation endpoint
   app.post("/api/translate", async (req, res) => {
     const { text, targetLang } = req.body;
