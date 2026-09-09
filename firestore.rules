@@ -118,13 +118,21 @@ service cloud.firestore {
     // 4. COLLECTION RULES
 
     match /users/{userId} {
-      allow get: if true;
+      // Any signed-in user may fetch a profile by exact ID (own profile after login, or a
+      // referrer resolved via the list rule below); UIDs are unguessable, so this doesn't
+      // enable enumeration. Never allow this for signed-out clients.
+      allow get: if isSignedIn();
+
+      // list must hold for every possible document a query could return, so each clause here
+      // is a genuinely narrow, verifiable condition - never something true of every user doc
+      // (that would amount to "list the whole collection" despite reading as a filter).
       allow list: if isAdmin() || (isSignedIn() && !isSuspended() && (
-        // Allow users to see their referrals
+        // Users can see who they referred
         resource.data.referredByUid == request.auth.uid ||
-        // Allow public leaderboard & referral lookup (reading other profiles)
-        (resource.data.role in ['student', 'admin', 'moderator']) || 
-        true
+        // Referral code resolution (only matches accounts that opted into a referral code)
+        (resource.data.referralCode is string && resource.data.referralCode.size() > 0) ||
+        // Biometric device-collision check on enrollment
+        (resource.data.biometricDeviceId is string && resource.data.biometricDeviceId.size() > 0)
       ));
       
       allow create: if (isOwner(userId) || isAdmin()) && (
@@ -143,10 +151,12 @@ service cloud.firestore {
         (!('balance' in incoming()) || incoming().balance == existing().balance) &&
         (!('email' in incoming()) || incoming().email == existing().email) &&
         (!('status' in incoming()) || incoming().status == existing().status || incoming().status in ['active', 'device_blocked', 'suspended']) &&
-        (!('affiliateStatus' in existing()) || 
-         incoming().affiliateStatus == existing().affiliateStatus || 
+        (!('affiliateStatus' in existing()) ||
+         incoming().affiliateStatus == existing().affiliateStatus ||
          incoming().affiliateStatus in ['none', 'pending', 'active'])
       ) || isAdmin();
+
+      allow delete: if isAdmin();
     }
 
     // --- Payments ---
@@ -213,6 +223,13 @@ service cloud.firestore {
     match /system_logs/{logId} {
       allow read: if isAdmin();
       allow create: if isSignedIn() && incoming().userId == request.auth.uid;
+    }
+
+    // --- Login Events (admin analytics: visit frequency / peak hours) ---
+    match /login_events/{eventId} {
+      allow read, list: if isAdmin();
+      allow create: if isSignedIn() && incoming().uid == request.auth.uid;
+      allow update, delete: if false;
     }
 
     // --- Quotes ---
