@@ -225,6 +225,13 @@ service cloud.firestore {
       allow create: if isSignedIn() && incoming().userId == request.auth.uid;
     }
 
+    // --- Login Events (admin analytics: visit frequency / peak hours) ---
+    match /login_events/{eventId} {
+      allow read, list: if isAdmin();
+      allow create: if isSignedIn() && incoming().uid == request.auth.uid;
+      allow update, delete: if false;
+    }
+
     // --- Quotes ---
     match /quotes/{quoteId} {
       allow read: if isSignedIn() && !isSuspended();
