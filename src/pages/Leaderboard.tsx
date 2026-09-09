@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { collection, query, orderBy, limit, onSnapshot, where, getDocs, doc, getDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
+import axios from 'axios';
 import { Trophy, Medal, Crown, ArrowLeft, TrendingUp, Sparkles, Award, Users, Filter, CheckCircle2, ShieldCheck } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { format, startOfWeek, endOfWeek } from 'date-fns';
@@ -32,6 +33,7 @@ export default function Leaderboard() {
   const [selectedDept, setSelectedDept] = useState<string>('All');
   const navigate = useNavigate();
   const { t } = useLanguage();
+  const profileCacheRef = useRef<Record<string, { displayName: string; department?: string; role?: string }>>({});
 
   // Load user's paid departments
   useEffect(() => {
@@ -116,39 +118,34 @@ export default function Leaderboard() {
       }
 
       try {
-        // Fetch users details in chunks of 30
-        const userDetailsMap: Record<string, { displayName: string; department?: string; role?: string }> = {};
-        
-        // Chunk userIds to avoid Firestore 'in' limit (max 30)
-        const chunkSize = 30;
-        const chunks: string[][] = [];
-        for (let i = 0; i < userIds.length; i += chunkSize) {
-          chunks.push(userIds.slice(i, i + chunkSize));
-        }
+        // Only fetch profiles we haven't already resolved in this session - most snapshot
+        // updates only add/change a handful of participants, not the whole leaderboard.
+        const uncachedIds = userIds.filter(uid => !profileCacheRef.current[uid]);
 
-        await Promise.all(chunks.map(async (chunk) => {
+        if (uncachedIds.length > 0) {
           try {
-            const uQuery = query(collection(db, 'users'), where('__name__', 'in', chunk));
-            const uSnap = await getDocs(uQuery);
-            uSnap.docs.forEach(d => {
-              const uData = d.data();
-              userDetailsMap[d.id] = {
-                displayName: uData.displayName || 'Scholar',
-                department: uData.department || '',
-                role: uData.role || 'student'
+            const idToken = await user?.getIdToken();
+            const res = await axios.post('/api/public-profiles', { userIds: uncachedIds }, {
+              headers: { Authorization: `Bearer ${idToken}` }
+            });
+            (res.data.profiles || []).forEach((p: any) => {
+              profileCacheRef.current[p.id] = {
+                displayName: p.displayName,
+                department: p.department,
+                role: p.role
               };
             });
           } catch (e) {
-            console.warn("Error fetching user chunk:", e);
+            console.warn("Error fetching scholar profiles:", e);
           }
-        }));
+        }
 
         // Build list of scholars with points calculation:
         // Points = (Total Questions Attempted × 2) + (Total Correct Answers × 0.5)
         const entries: LeaderboardEntry[] = userIds
           .map(uid => {
             const stats = userAggregates[uid];
-            const uInfo = userDetailsMap[uid] || { displayName: 'Scholar', department: '', role: 'student' };
+            const uInfo = profileCacheRef.current[uid] || { displayName: 'Scholar', department: '', role: 'student' };
             const points = (stats.attempted * 2) + (stats.correct * 0.5);
             const accuracy = stats.attempted > 0 ? Math.round((stats.correct / stats.attempted) * 100) : 0;
             return {

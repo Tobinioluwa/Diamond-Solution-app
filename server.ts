@@ -584,6 +584,44 @@ async function startServer() {
     }
   });
 
+  // Public profile lookup: returns only non-sensitive display fields for a batch of user IDs.
+  // Used by the leaderboard/dashboard rankings so the client never needs broad read access
+  // to the users collection (which also holds email, balance, and bank details).
+  app.post("/api/public-profiles", verifyFirebaseToken, async (req, res) => {
+    try {
+      const { userIds } = z.object({
+        userIds: z.array(z.string().min(1)).min(1).max(100)
+      }).parse(req.body);
+
+      const db = await getFirestore();
+      const uniqueIds = Array.from(new Set(userIds));
+
+      const docs = await Promise.all(
+        uniqueIds.map((id) => db.collection("users").doc(id).get().catch(() => null))
+      );
+
+      const profiles = docs
+        .filter((d): d is FirebaseFirestore.DocumentSnapshot => !!d && d.exists)
+        .map((d) => {
+          const data = d.data() || {};
+          return {
+            id: d.id,
+            displayName: data.displayName || "Scholar",
+            department: data.department || "",
+            role: data.role || "student"
+          };
+        });
+
+      res.json({ profiles });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.issues[0].message });
+      }
+      console.error("[Public Profiles] Error:", error.message);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Translation endpoint
   app.post("/api/translate", async (req, res) => {
     const { text, targetLang } = req.body;
