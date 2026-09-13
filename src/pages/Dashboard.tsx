@@ -16,6 +16,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import axios from 'axios';
 import { cn } from '../lib/utils';
 import { handleFirestoreError, OperationType, safeOnSnapshot } from '../lib/firebaseUtils';
+import { getAllCoursesCached } from '../lib/coursesCache';
 import { format, startOfWeek, endOfWeek, subDays, eachDayOfInterval } from 'date-fns';
 import { 
   ResponsiveContainer, 
@@ -128,15 +129,16 @@ export default function Dashboard() {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Fetch all courses for live search
+  // Fetch all courses for live search. This is a one-time cached fetch, not a live listener -
+  // the course catalog barely ever changes, and every Dashboard visit (the app's home page,
+  // for every user) previously re-read the entire collection just to power an optional
+  // search box. See src/lib/coursesCache.ts.
   useEffect(() => {
-    const qCourses = query(collection(db, 'courses'));
-    const unsub = safeOnSnapshot(qCourses, (snap) => {
-      const docs = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter((c: any) => !c.isDeleted);
-      setAllCourses(docs);
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'courses'));
-
-    return () => unsub();
+    let cancelled = false;
+    getAllCoursesCached()
+      .then(docs => { if (!cancelled) setAllCourses(docs); })
+      .catch(err => handleFirestoreError(err, OperationType.LIST, 'courses'));
+    return () => { cancelled = true; };
   }, []);
 
   // Fetch user paid departments

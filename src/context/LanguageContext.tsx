@@ -18,7 +18,7 @@ const translations: Record<Language, Record<string, string>> = {
     'splash.questions': 'Questions',
     'splash.commission': 'Commission',
     'splash.initiate': 'Register here',
-    'splash.signin': 'Sign In to Repository',
+    'splash.signin': 'Sign In',
     'splash.professional': 'Professional • Secured • Institutionalized',
     
     // Auth
@@ -412,7 +412,7 @@ const translations: Record<Language, Record<string, string>> = {
     'splash.questions': 'Questions',
     'splash.commission': 'Commission',
     'splash.initiate': 'Initier un Parcours Académique',
-    'splash.signin': 'Se connecter au Dépôt',
+    'splash.signin': 'Se connecter',
     'splash.professional': 'Professionnel • Sécurisé • Institutionnalisé',
     
     // Auth
