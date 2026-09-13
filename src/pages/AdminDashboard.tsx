@@ -1561,8 +1561,16 @@ function AnalyticsDashboard({ stats }: { stats: any }) {
       cutoff.setDate(cutoff.getDate() - (engagementPeriod - 1));
       const cutoffKey = cutoff.toISOString().split('T')[0];
 
-      // Most active users: aggregate dailyPractice (already written per study session) over the window
-      const practiceSnap = await getDocs(query(collection(db, 'dailyPractice'), where('date', '>=', cutoffKey)));
+      // Most active users: aggregate dailyPractice (already written per study session) over the
+      // window. Capped with limit() - an unbounded range query here reads the whole matching
+      // window in one shot every time this tab is opened or refreshed, which is exactly the
+      // read-amplification mistake this feature was built to avoid making elsewhere.
+      const practiceSnap = await getDocs(query(
+        collection(db, 'dailyPractice'),
+        where('date', '>=', cutoffKey),
+        orderBy('date', 'desc'),
+        limit(1000)
+      ));
       const userAgg: Record<string, { attempted: number; correct: number; studyDuration: number }> = {};
       practiceSnap.docs.forEach(d => {
         const data = d.data();
@@ -1603,8 +1611,14 @@ function AnalyticsDashboard({ stats }: { stats: any }) {
         studyDuration: userAgg[uid].studyDuration
       })));
 
-      // Visit frequency & peak hours: login_events written once per sign-in (see SessionService)
-      const visitsSnap = await getDocs(query(collection(db, 'login_events'), where('dateKey', '>=', cutoffKey)));
+      // Visit frequency & peak hours: login_events written once per sign-in (see SessionService).
+      // Same reasoning as above - bounded with limit() rather than an open-ended range read.
+      const visitsSnap = await getDocs(query(
+        collection(db, 'login_events'),
+        where('dateKey', '>=', cutoffKey),
+        orderBy('dateKey', 'desc'),
+        limit(1000)
+      ));
       const dayBuckets: Record<string, number> = {};
       for (let i = 0; i < engagementPeriod; i++) {
         const d = new Date();
