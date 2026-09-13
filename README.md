@@ -42,6 +42,24 @@ grant access on its own). The Firebase **Admin SDK** used by `server.ts` authent
 Application Default Credentials (no service-account JSON is checked in); see `getFirestore()`
 in `server.ts` for how it resolves the project/database.
 
+### Going live with Paystack
+
+`VITE_PAYSTACK_PUBLIC_KEY`/`PAYSTACK_SECRET_KEY` accept either Paystack's **test** keys
+(`pk_test_...`/`sk_test_...`) or **live** keys (`pk_live_...`/`sk_live_...`). To accept real
+payments:
+
+1. In the Paystack dashboard, switch to Live mode and copy the live key pair.
+2. Set them as `VITE_PAYSTACK_PUBLIC_KEY` / `PAYSTACK_SECRET_KEY` in your actual deployment
+   environment's env vars — not in a file committed to git.
+3. Redeploy so `server.ts` (which serves the public key to the client via
+   `/api/paystack-config`, and does all secret-key verification) picks up the new values.
+4. Do one small real transaction post-deploy to confirm verification succeeds end-to-end.
+
+The client-side "DEBUG MODE: SIMULATE payment?" fallback (shown when no valid public key is
+configured) and the server's matching `sim_`-prefixed reference bypass only activate outside
+production (`import.meta.env.DEV` / `NODE_ENV !== 'production'`) — see
+[Operational notes](#operational-notes--lessons-learned).
+
 ## Project structure
 
 ```
@@ -191,6 +209,23 @@ before touching real-time listeners:
   tabs each hold such listeners, but they're scoped to only mount while that specific tab is
   open — if usage spikes again, check whether an admin is leaving one of those tabs open for
   long periods during high user activity.
+- **Never `navigate()` to a protected route immediately after a Firebase Auth sign-in call
+  resolves.** `AuthContext`'s `onIdTokenChanged`/profile listeners haven't necessarily updated
+  `user`/`loading` yet on that same tick, so `ProtectedRoute` can briefly still see `user: null`
+  and bounce straight back to `/login` before the real state lands a moment later — a visible
+  redirect flicker. All three login paths in `Login.tsx` (password, biometric, OTP
+  device-verification) delay the post-login `navigate()` by 500ms for this reason; keep that
+  pattern for any new sign-in flow.
+- **Payment "simulate" bypasses must be hard-gated to non-production, not just to "no key
+  configured."** The Paystack integration has a local-dev convenience — a `sim_`-prefixed
+  reference skips real gateway verification — used by "DEBUG MODE" buttons that appear
+  whenever `VITE_PAYSTACK_PUBLIC_KEY` is missing/placeholder (`CourseDetail.tsx`,
+  `CourseList.tsx`, `Reactivation.tsx`) and honored server-side in
+  `/api/verify-departmental-payment` (`server.ts`). A missing/placeholder key is not proof of
+  "we're in development" — it's equally what a misconfigured production deploy looks like — so
+  both sides now additionally require `import.meta.env.DEV` / `NODE_ENV !== 'production'`.
+  Before this fix, any signed-in user could grant themselves a paid course for free by
+  submitting a fabricated `sim_` reference directly to the endpoint, in any environment.
 
 ## Deployment
 
