@@ -29,6 +29,8 @@ import {
 } from 'recharts';
 import OnboardingTour from '../components/OnboardingTour';
 import { DEPARTMENTS } from '../constants';
+import { formatScholarName, getScholarInitials } from '../utils/user';
+import { formatUniversityName } from '../utils/university';
 
 interface CourseSearchResult {
   id: string;
@@ -47,7 +49,7 @@ export default function Dashboard() {
 
   const activeUserUid = loggedInUser?.uid;
   const activeProfile = loggedInProfile;
-  const weekScholarProfileCacheRef = useRef<Record<string, { displayName: string; department?: string }>>({});
+  const weekScholarProfileCacheRef = useRef<Record<string, { displayName: string; department?: string; university?: string }>>({});
 
   const [quote, setQuote] = useState<any>(null);
   const [stats, setStats] = useState({
@@ -97,6 +99,7 @@ export default function Dashboard() {
   const [topWeekScholars, setTopWeekScholars] = useState<Array<{
     userId: string;
     userName: string;
+    university: string;
     points: number;
     accuracy: number;
     attempted: number;
@@ -500,12 +503,36 @@ export default function Dashboard() {
             });
             (res.data.profiles || []).forEach((p: any) => {
               weekScholarProfileCacheRef.current[p.id] = {
-                displayName: p.displayName,
-                department: p.department
+                displayName: p.displayName || p.username || 'Scholar',
+                department: p.department || '',
+                university: p.university || 'University of Ibadan'
               };
             });
           } catch (e) {
-            console.warn("Error fetching scholar profiles:", e);
+            console.warn("Error fetching scholar profiles via API:", e);
+          }
+
+          // Client-side fallback: directly fetch any remaining uncached user docs
+          const stillUncached = uncachedIds.filter(id => !weekScholarProfileCacheRef.current[id] || weekScholarProfileCacheRef.current[id].displayName === 'Scholar');
+          if (stillUncached.length > 0) {
+            await Promise.all(
+              stillUncached.map(async (uid) => {
+                try {
+                  const userDocSnap = await getDoc(doc(db, 'users', uid));
+                  if (userDocSnap.exists()) {
+                    const uData = userDocSnap.data();
+                    const cleanName = formatScholarName(uData);
+                    weekScholarProfileCacheRef.current[uid] = {
+                      displayName: cleanName,
+                      department: uData.department || '',
+                      university: uData.university || uData.institutionalName || uData.institution || 'University of Ibadan'
+                    };
+                  }
+                } catch {
+                  // Silently ignore permission errors
+                }
+              })
+            );
           }
         }
 
@@ -514,20 +541,32 @@ export default function Dashboard() {
 
         const entries = userIds.map(uid => {
           const s = userAggregates[uid];
-          const uInfo = weekScholarProfileCacheRef.current[uid] || { displayName: 'Scholar', department: '' };
+          const uInfo = weekScholarProfileCacheRef.current[uid] || { displayName: 'Scholar', department: '', university: 'University of Ibadan' };
+          
+          let resolvedName = formatScholarName(uInfo.displayName || uInfo);
+          if (uid === activeUserUid && activeProfile) {
+            const myName = formatScholarName(activeProfile);
+            if (myName && myName !== 'Scholar') {
+              resolvedName = myName;
+            }
+          }
+
+          // Resolve university in full
+          const rawUniv = (uid === activeUserUid && (activeProfile?.university || activeProfile?.institutionalName)) 
+            ? (activeProfile.university || activeProfile.institutionalName) 
+            : (uInfo.university || 'University of Ibadan');
+          const resolvedUniversity = formatUniversityName(rawUniv);
+
           // Points Formula: (Attempted * 2) + (Correct * 0.5)
           const points = (s.attempted * 2) + (s.correct * 0.5);
           const accuracy = s.attempted > 0 ? Math.round((s.correct / s.attempted) * 100) : 0;
-          
-          const nameParts = uInfo.displayName.trim().split(' ');
-          const initials = nameParts.length > 1 
-            ? `${nameParts[0][0]}${nameParts[1][0]}`.toUpperCase()
-            : uInfo.displayName.substring(0, 2).toUpperCase();
+          const initials = getScholarInitials(resolvedName);
 
           return {
             userId: uid,
-            userName: uInfo.displayName,
-            department: uInfo.department,
+            userName: resolvedName,
+            university: resolvedUniversity,
+            department: (uid === activeUserUid && activeProfile?.department) ? activeProfile.department : uInfo.department,
             points: Math.round(points * 10) / 10,
             accuracy,
             attempted: s.attempted,
@@ -597,10 +636,7 @@ export default function Dashboard() {
           <div className="relative z-10 mt-6">
             <p className="text-xs text-white/70 font-medium">{getTimeGreeting()},</p>
             <h2 className="text-2xl sm:text-3xl font-black text-white font-serif mt-0.5">
-              {(() => {
-                const rawName = activeProfile?.username || activeProfile?.displayName?.split(' ')[0] || 'Scholar';
-                return rawName.charAt(0).toUpperCase() + rawName.slice(1);
-              })()}
+              {formatScholarName(activeProfile)}
             </h2>
           </div>
 
@@ -1238,8 +1274,13 @@ export default function Dashboard() {
                   <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#1B3FA0] to-[#0B1E3D] text-white font-bold text-xs flex items-center justify-center font-serif">
                     {scholar.initials}
                   </div>
-                  <div className="flex-1">
-                    <div className="font-bold text-xs text-[#0B1E3D]">{scholar.userName}</div>
+                  <div className="flex-1 min-w-0">
+                    <div className="font-bold text-xs text-[#0B1E3D] flex items-center flex-wrap gap-1">
+                      <span>{scholar.userName}</span>
+                      <span className="text-[11px] font-semibold text-slate-500">
+                        ({scholar.university})
+                      </span>
+                    </div>
                     <div className="text-[10px] text-slate-400">{scholar.accuracy}% accuracy • {scholar.attempted} q's</div>
                   </div>
                   <div className="text-xs font-black text-[#1B3FA0]">

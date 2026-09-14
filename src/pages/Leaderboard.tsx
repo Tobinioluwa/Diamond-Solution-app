@@ -11,10 +11,13 @@ import { cn } from '../lib/utils';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { DEPARTMENTS } from '../constants';
+import { formatUniversityName } from '../utils/university';
+import { formatScholarName, getScholarInitials } from '../utils/user';
 
 interface LeaderboardEntry {
   userId: string;
   userName: string;
+  university?: string;
   department?: string;
   attempted: number;
   correct: number;
@@ -33,7 +36,7 @@ export default function Leaderboard() {
   const [selectedDept, setSelectedDept] = useState<string>('All');
   const navigate = useNavigate();
   const { t } = useLanguage();
-  const profileCacheRef = useRef<Record<string, { displayName: string; department?: string; role?: string }>>({});
+  const profileCacheRef = useRef<Record<string, { displayName: string; department?: string; university?: string; role?: string }>>({});
 
   // Load user's paid departments
   useEffect(() => {
@@ -130,13 +133,38 @@ export default function Leaderboard() {
             });
             (res.data.profiles || []).forEach((p: any) => {
               profileCacheRef.current[p.id] = {
-                displayName: p.displayName,
-                department: p.department,
-                role: p.role
+                displayName: p.displayName || p.username || 'Scholar',
+                department: p.department || '',
+                university: p.university || 'University of Ibadan',
+                role: p.role || 'student'
               };
             });
           } catch (e) {
-            console.warn("Error fetching scholar profiles:", e);
+            console.warn("Error fetching scholar profiles via API:", e);
+          }
+
+          // Client-side fallback: directly fetch any remaining uncached user docs
+          const stillUncached = uncachedIds.filter(id => !profileCacheRef.current[id] || profileCacheRef.current[id].displayName === 'Scholar');
+          if (stillUncached.length > 0) {
+            await Promise.all(
+              stillUncached.map(async (uid) => {
+                try {
+                  const userDocSnap = await getDoc(doc(db, 'users', uid));
+                  if (userDocSnap.exists()) {
+                    const uData = userDocSnap.data();
+                    const cleanName = formatScholarName(uData);
+                    profileCacheRef.current[uid] = {
+                      displayName: cleanName,
+                      department: uData.department || '',
+                      university: uData.university || uData.institutionalName || uData.institution || 'University of Ibadan',
+                      role: uData.role || 'student'
+                    };
+                  }
+                } catch {
+                  // Silently ignore permission errors on single docs
+                }
+              })
+            );
           }
         }
 
@@ -145,13 +173,24 @@ export default function Leaderboard() {
         const entries: LeaderboardEntry[] = userIds
           .map(uid => {
             const stats = userAggregates[uid];
-            const uInfo = profileCacheRef.current[uid] || { displayName: 'Scholar', department: '', role: 'student' };
+            const uInfo = profileCacheRef.current[uid] || { displayName: 'Scholar', department: '', university: 'University of Ibadan', role: 'student' };
+            
+            // Prioritize active logged-in user's live profile or resolved public profile name
+            let resolvedName = formatScholarName(uInfo.displayName || uInfo);
+            if (uid === user?.uid && profile) {
+              const liveName = formatScholarName(profile);
+              if (liveName && liveName !== 'Scholar') {
+                resolvedName = liveName;
+              }
+            }
+
             const points = (stats.attempted * 2) + (stats.correct * 0.5);
             const accuracy = stats.attempted > 0 ? Math.round((stats.correct / stats.attempted) * 100) : 0;
             return {
               userId: uid,
-              userName: uInfo.displayName,
-              department: uInfo.department,
+              userName: resolvedName,
+              department: (uid === user?.uid && profile?.department) ? profile.department : uInfo.department,
+              university: formatUniversityName((uid === user?.uid && (profile?.university || profile?.institutionalName)) ? (profile.university || profile.institutionalName) : uInfo.university),
               attempted: stats.attempted,
               correct: stats.correct,
               points: Math.round(points * 10) / 10,
@@ -322,11 +361,16 @@ export default function Leaderboard() {
                   <div key={scholar.userId} className="flex items-center justify-between p-5 group hover:bg-[#EEF3FF]/60 transition-colors">
                     <div className="flex items-center gap-4">
                       <span className="text-xs font-mono font-bold text-slate-500 w-6">#{scholar.rank}</span>
-                      <div className="w-10 h-10 rounded-2xl bg-[#EEF3FF] border border-[#D4E0FC] flex items-center justify-center font-black text-[#1B3FA0]">
-                        {scholar.userName.charAt(0)}
+                      <div className="w-10 h-10 rounded-2xl bg-[#EEF3FF] border border-[#D4E0FC] flex items-center justify-center font-black text-xs text-[#1B3FA0]">
+                        {getScholarInitials(scholar.userName)}
                       </div>
                       <div>
-                        <h4 className="text-sm font-bold text-[#0B1E3D] group-hover:text-[#1B3FA0] transition-colors">{scholar.userName}</h4>
+                        <h4 className="text-sm font-bold text-[#0B1E3D] group-hover:text-[#1B3FA0] transition-colors flex items-center flex-wrap gap-1.5">
+                          <span>{scholar.userName}</span>
+                          <span className="text-xs font-semibold text-slate-500">
+                            ({scholar.university})
+                          </span>
+                        </h4>
                         <p className="text-[10px] text-slate-500 font-medium">
                           {scholar.correct} correct of {scholar.attempted} attempted
                         </p>
@@ -375,10 +419,10 @@ function PodiumCard({ scholar, rank }: { scholar: LeaderboardEntry; rank: number
       <div className="relative flex flex-col items-center text-center">
         <div className="relative mb-4">
           <div className={cn(
-            "w-20 h-20 rounded-2xl flex items-center justify-center text-3xl font-black border-2",
+            "w-20 h-20 rounded-2xl flex items-center justify-center text-2xl font-black border-2",
             rank === 1 ? "bg-[#FEF9E7] border-[#F5E5A4] text-[#0B1E3D]" : "bg-[#EEF3FF] border-[#D4E0FC] text-[#0B1E3D]"
           )}>
-            {scholar.userName.charAt(0)}
+            {getScholarInitials(scholar.userName)}
           </div>
           <div className={cn(
             "absolute -top-3 -right-3 w-8 h-8 rounded-full flex items-center justify-center shadow-md text-white border-2 border-white",
@@ -391,7 +435,12 @@ function PodiumCard({ scholar, rank }: { scholar: LeaderboardEntry; rank: number
         <span className={cn("text-[10px] font-black uppercase tracking-[0.2em] mb-1 px-3 py-0.5 rounded-full border", config.bg, config.border, config.color)}>
           Rank #{rank} • {config.label}
         </span>
-        <h3 className="text-lg font-black text-[#0B1E3D] group-hover:text-[#1B3FA0] transition-colors mt-2">{scholar.userName}</h3>
+        <h3 className="text-lg font-black text-[#0B1E3D] group-hover:text-[#1B3FA0] transition-colors mt-2">
+          <span>{scholar.userName}</span>
+          <span className="block text-xs font-semibold text-slate-500 mt-1">
+            ({scholar.university})
+          </span>
+        </h3>
         
         <div className="mt-6 w-full space-y-2.5">
           <div className="flex justify-between items-end border-b border-[#DDE5F5] pb-2">

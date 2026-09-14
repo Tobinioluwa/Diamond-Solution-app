@@ -604,10 +604,39 @@ async function startServer() {
         .filter((d): d is FirebaseFirestore.DocumentSnapshot => !!d && d.exists)
         .map((d) => {
           const data = d.data() || {};
+          const uName = (typeof data.username === 'string' ? data.username : '').trim();
+          const dName = (typeof data.displayName === 'string' ? data.displayName : '').trim();
+          const fName = (typeof data.fullName === 'string' ? data.fullName : (typeof data.name === 'string' ? data.name : '')).trim();
+          const email = (typeof data.email === 'string' ? data.email : '').trim();
+
+          let resolvedName = '';
+          if (uName && uName.toLowerCase() !== 'scholar' && !uName.includes('@')) {
+            resolvedName = uName.charAt(0).toUpperCase() + uName.slice(1);
+          } else if (dName && dName.toLowerCase() !== 'scholar' && !dName.includes('@')) {
+            resolvedName = dName.charAt(0).toUpperCase() + dName.slice(1);
+          } else if (fName && fName.toLowerCase() !== 'scholar' && !fName.includes('@')) {
+            resolvedName = fName.charAt(0).toUpperCase() + fName.slice(1);
+          } else if (email && email.includes('@')) {
+            const rawPrefix = email.split('@')[0];
+            const stripped = rawPrefix.replace(/\d+$/, '');
+            const clean = stripped.length >= 2 ? stripped : rawPrefix;
+            resolvedName = clean.charAt(0).toUpperCase() + clean.slice(1);
+          } else if (uName) {
+            resolvedName = uName.charAt(0).toUpperCase() + uName.slice(1);
+          } else if (dName) {
+            resolvedName = dName.charAt(0).toUpperCase() + dName.slice(1);
+          } else {
+            resolvedName = 'Scholar';
+          }
+
+          const rawUniv = data.university || data.institutionalName || data.institution || data.school || data.college || "University of Ibadan";
+
           return {
             id: d.id,
-            displayName: data.displayName || "Scholar",
+            username: uName || resolvedName,
+            displayName: resolvedName,
             department: data.department || "",
+            university: rawUniv,
             role: data.role || "student"
           };
         });
