@@ -10,6 +10,7 @@ import { Key, ShieldCheck, Mail, ArrowLeft, Loader2, Landmark, Save, User } from
 import { motion, AnimatePresence } from 'motion/react';
 import axios from 'axios';
 import { getFriendlyErrorMessage } from '../utils/firebaseError';
+import { formatUniversityName, DEFAULT_UNIVERSITY } from '../utils/university';
 
 export default function AccountSettings() {
   const { user, profile } = useAuth();
@@ -36,15 +37,25 @@ export default function AccountSettings() {
   });
 
   const [newUsername, setNewUsername] = useState('');
-  const [usernameLoading, setUsernameLoading] = useState(false);
+  const [newUniversity, setNewUniversity] = useState('');
+  const [newWhatsApp, setNewWhatsApp] = useState('');
+  const [identityLoading, setIdentityLoading] = useState(false);
 
   useEffect(() => {
     if (profile?.username) {
       setNewUsername(profile.username);
     }
+    if (profile?.institutionalName || profile?.university) {
+      setNewUniversity(formatUniversityName(profile.institutionalName || profile.university));
+    } else {
+      setNewUniversity(DEFAULT_UNIVERSITY);
+    }
+    if (profile?.whatsapp || profile?.whatsappNumber || profile?.phone) {
+      setNewWhatsApp(profile.whatsapp || profile.whatsappNumber || profile.phone);
+    }
   }, [profile]);
 
-  const saveUsername = async (e: React.FormEvent) => {
+  const saveIdentity = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) return;
     const cleanUsername = newUsername.toLowerCase().replace(/\s/g, '').trim();
@@ -52,17 +63,24 @@ export default function AccountSettings() {
       alert('Username cannot be empty.');
       return;
     }
-    setUsernameLoading(true);
+    const fullUni = formatUniversityName(newUniversity);
+    setIdentityLoading(true);
     try {
       await setDoc(doc(db, 'users', user.uid), {
-        username: cleanUsername
+        username: cleanUsername,
+        institutionalName: fullUni,
+        university: fullUni,
+        whatsapp: newWhatsApp.trim(),
+        whatsappNumber: newWhatsApp.trim(),
+        phone: newWhatsApp.trim()
       }, { merge: true });
-      alert('Username updated successfully.');
+      setNewUniversity(fullUni);
+      alert('Profile details updated successfully.');
     } catch (err: any) {
       console.error(err);
-      alert('Failed to update username: ' + err.message);
+      alert('Failed to update profile: ' + err.message);
     }
-    setUsernameLoading(false);
+    setIdentityLoading(false);
   };
 
   useEffect(() => {
@@ -184,32 +202,56 @@ export default function AccountSettings() {
              </div>
              <div>
                <h3 className="text-lg font-serif font-black text-slate-900 uppercase">User Identity</h3>
-               <p className="text-[10px] text-slate-400 font-medium uppercase tracking-widest">Update Your Academic Username</p>
+               <p className="text-[10px] text-slate-400 font-medium uppercase tracking-widest">Update Your Username, University, and WhatsApp Number</p>
              </div>
            </header>
 
-           <form onSubmit={saveUsername} className="space-y-6">
-             <div className="space-y-1.5">
-               <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1">Username</label>
-               <input 
-                 required
-                 type="text"
-                 placeholder="jacksparrow"
-                 value={newUsername}
-                 onChange={(e) => setNewUsername(e.target.value.toLowerCase().replace(/\s/g, ''))}
-                 className="w-full bg-[#EEF3FF]/50 border border-[#D8E3FF] rounded-2xl px-5 py-3.5 text-xs text-slate-900 focus:border-[#2563EB] outline-none transition-all lowercase"
-               />
+           <form onSubmit={saveIdentity} className="space-y-6">
+             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+               <div className="space-y-1.5">
+                 <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1">Username (Leaderboard Display)</label>
+                 <input 
+                   required
+                   type="text"
+                   placeholder="peter"
+                   value={newUsername}
+                   onChange={(e) => setNewUsername(e.target.value.toLowerCase().replace(/\s/g, ''))}
+                   className="w-full bg-[#EEF3FF]/50 border border-[#D8E3FF] rounded-2xl px-5 py-3.5 text-xs text-slate-900 focus:border-[#2563EB] outline-none transition-all lowercase font-medium"
+                 />
+               </div>
+
+               <div className="space-y-1.5">
+                 <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1">University / Institution (Full Name)</label>
+                 <input 
+                   type="text"
+                   placeholder="e.g. University of Ibadan"
+                   value={newUniversity}
+                   onChange={(e) => setNewUniversity(e.target.value)}
+                   className="w-full bg-[#EEF3FF]/50 border border-[#D8E3FF] rounded-2xl px-5 py-3.5 text-xs text-slate-900 focus:border-[#2563EB] outline-none transition-all font-medium"
+                 />
+               </div>
+
+               <div className="space-y-1.5 md:col-span-2">
+                 <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1">WhatsApp Number (e.g. +2348012345678)</label>
+                 <input 
+                   type="tel"
+                   placeholder="+2348012345678"
+                   value={newWhatsApp}
+                   onChange={(e) => setNewWhatsApp(e.target.value)}
+                   className="w-full bg-[#EEF3FF]/50 border border-[#D8E3FF] rounded-2xl px-5 py-3.5 text-xs text-slate-900 focus:border-[#2563EB] outline-none transition-all font-mono font-bold tracking-wide"
+                 />
+               </div>
              </div>
 
              <button 
                type="submit"
-               disabled={usernameLoading}
-               className="w-full h-14 bg-[#2563EB] text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-[#1d4ed8] transition-all flex items-center justify-center gap-3 active:scale-95 shadow-md shadow-[#2563EB]/20"
+               disabled={identityLoading}
+               className="w-full h-14 bg-[#2563EB] text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-[#1d4ed8] transition-all flex items-center justify-center gap-3 active:scale-95 shadow-md shadow-[#2563EB]/20 cursor-pointer"
              >
-               {usernameLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : (
+               {identityLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : (
                  <>
                    <Save className="w-4 h-4" />
-                   <span>Save Username</span>
+                   <span>Save Identity & University</span>
                  </>
                )}
              </button>

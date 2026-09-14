@@ -7,15 +7,17 @@ export function downloadCSV(data: any[], filename: string) {
     ...data.map(row => 
       headers.map(fieldName => {
         const value = row[fieldName];
-        // Handle strings with commas by wrapping in quotes
-        const escaped = ('' + (value === null || value === undefined ? '' : value)).replace(/"/g, '""');
+        // Handle null/undefined and escape quotes
+        const strVal = value === null || value === undefined ? '' : String(value);
+        const escaped = strVal.replace(/"/g, '""');
         return `"${escaped}"`;
       }).join(',')
     )
   ];
 
-  const csvContent = csvRows.join('\n');
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const csvContent = csvRows.join('\r\n');
+  // Include UTF-8 BOM (\uFEFF) so Excel, Numbers, and Google Sheets correctly preserve Unicode and text formatting without mangling numbers
+  const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.setAttribute('href', url);
@@ -24,4 +26,5 @@ export function downloadCSV(data: any[], filename: string) {
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 }

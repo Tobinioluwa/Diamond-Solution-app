@@ -220,6 +220,7 @@ const translations: Record<Language, Record<string, string>> = {
     // Admin Dashboard
     'admin.dashboard': 'Dashboard',
     'admin.users': 'Users',
+    'admin.whatsapp': 'WhatsApp Numbers',
     'admin.practice': 'Daily Practice',
     'admin.affiliates': 'Affiliates',
     'admin.withdrawals': 'Withdrawals',
@@ -614,6 +615,7 @@ const translations: Record<Language, Record<string, string>> = {
     // Admin Dashboard
     'admin.dashboard': 'Tableau de Bord',
     'admin.users': 'Utilisateurs',
+    'admin.whatsapp': 'Numéros WhatsApp',
     'admin.practice': 'Pratique Quotidienne',
     'admin.affiliates': 'Affiliés',
     'admin.withdrawals': 'Retraits',

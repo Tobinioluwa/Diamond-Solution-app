@@ -15,6 +15,7 @@ import { getFriendlyErrorMessage } from '../utils/firebaseError';
 import { getOrGenerateDeviceId } from '../utils/deviceHelper';
 
 import { DEPARTMENTS } from '../constants';
+import { formatUniversityName, DEFAULT_UNIVERSITY } from '../utils/university';
 
 const Platform = {
   OS: typeof window !== 'undefined' && /iPad|iPhone|iPod/.test(navigator.userAgent) ? 'ios' : 'android'
@@ -542,6 +543,8 @@ export default function Login() {
             balance: 0,
             currency: 'NGN',
             language: 'en',
+            institutionalName: DEFAULT_UNIVERSITY,
+            university: DEFAULT_UNIVERSITY,
             emailVerified: false
           };
           await setDoc(userDocRef, defaultProfile);
@@ -663,9 +666,12 @@ export default function Login() {
           email,
           displayName: name,
           username: username.toLowerCase().trim() || email.split('@')[0],
-          institutionalName: institutionalName,
+          institutionalName: formatUniversityName(institutionalName),
+          university: formatUniversityName(institutionalName),
           department: department,
           phone: `${countryCode}${phone}`,
+          whatsapp: `${countryCode}${phone}`,
+          whatsappNumber: `${countryCode}${phone}`,
           role: 'student',
           createdAt: new Date().toISOString(),
           referralCode: 'DS' + Math.random().toString(36).substring(2, 8).toUpperCase(),
@@ -1267,11 +1273,11 @@ export default function Login() {
                           </div>
                         </div>
                         <div className="space-y-1.5" style={{ marginBottom: 16 }}>
-                          <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1" style={{ marginBottom: 6, includeFontPadding: false }}>INSTITUTION</label>
+                          <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1" style={{ marginBottom: 6, includeFontPadding: false }}>INSTITUTION / UNIVERSITY (FULL NAME)</label>
                           <div className="relative group" style={{ position: 'relative', zIndex: 1, elevation: 1 }}>
                             <input
                               type="text"
-                              placeholder="University"
+                              placeholder="e.g. University of Ibadan"
                               className="w-full px-4 h-[52px] bg-[#EEF3FF] border border-[#D8E3FF] rounded-2xl focus:ring-2 focus:ring-[#2563EB]/50 focus:border-[#2563EB] outline-none transition-all duration-200 text-sm font-medium"
                               value={institutionalName}
                               onChange={(e) => setInstitutionalName(e.target.value)}
@@ -1344,7 +1350,7 @@ export default function Login() {
                           </div>
                         </div>
                         <div className="space-y-1.5" style={{ marginBottom: 16 }}>
-                          <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1" style={{ marginBottom: 6, includeFontPadding: false }}>PHONE</label>
+                          <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1" style={{ marginBottom: 6, includeFontPadding: false }}>WHATSAPP NUMBER</label>
                           <div className="flex gap-2" style={{ position: 'relative', zIndex: 1, elevation: 1 }}>
                             <select 
                               value={countryCode}
@@ -1377,7 +1383,7 @@ export default function Login() {
                             </select>
                             <input
                               type="tel"
-                              placeholder="811223344"
+                              placeholder="WhatsApp number (e.g. 811223344)"
                               className="flex-1 px-4 h-[52px] bg-[#EEF3FF] border border-[#D8E3FF] rounded-2xl focus:ring-2 focus:ring-[#2563EB]/50 focus:border-[#2563EB] outline-none transition-all duration-200 text-sm font-medium"
                               value={phone}
                               onChange={(e) => setPhone(e.target.value)}

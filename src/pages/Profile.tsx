@@ -8,6 +8,7 @@ import Layout from '../components/Layout';
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 import { User, Shield, LogOut, ChevronRight, Bell, CreditCard, HelpCircle, Gift, History } from 'lucide-react';
+import { formatUniversityName } from '../utils/university';
 
 export default function Profile() {
   const { user, profile, isAdmin } = useAuth();
@@ -61,7 +62,7 @@ export default function Profile() {
               <div className="grid gap-4">
                  <div className="space-y-1 bg-[#EEF3FF] p-4 rounded-2xl border border-[#D8E3FF]">
                     <p className="text-[8px] font-black text-text-3 uppercase tracking-widest">{t('profile.institution')}</p>
-                    <p className="text-sm font-bold text-text-1 tracking-tight">{profile?.institutionalName || t('profile.awaiting')}</p>
+                    <p className="text-sm font-bold text-text-1 tracking-tight">{formatUniversityName(profile?.institutionalName || profile?.university)}</p>
                  </div>
                  <div className="space-y-1 bg-[#EEF3FF] p-4 rounded-2xl border border-[#D8E3FF]">
                     <p className="text-[8px] font-black text-text-3 uppercase tracking-widest">{t('profile.contact')}</p>

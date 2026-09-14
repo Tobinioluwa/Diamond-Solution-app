@@ -25,8 +25,10 @@ import { isBiometricsSupported, authenticateBiometrics } from '../lib/biometrics
 import ImageUploader from '../components/ImageUploader';
 import { compressImage } from '../lib/imageUtils';
 import { MediaManager } from '../components/MediaManager';
+import { WhatsAppDirectoryManager } from '../components/WhatsAppDirectoryManager';
+import { formatUniversityName, DEFAULT_UNIVERSITY } from '../utils/university';
 
-type Tab = 'dashboard' | 'users' | 'affiliates' | 'withdrawals' | 'payments' | 'analytics' | 'departments' | 'questions' | 'pictures' | 'notifications' | 'quotes' | 'support' | 'logs' | 'settings';
+type Tab = 'dashboard' | 'users' | 'whatsapp' | 'affiliates' | 'withdrawals' | 'payments' | 'analytics' | 'departments' | 'questions' | 'pictures' | 'notifications' | 'quotes' | 'support' | 'logs' | 'settings';
 
 export default function AdminDashboard() {
   const { t } = useLanguage();
@@ -324,6 +326,7 @@ export default function AdminDashboard() {
           <NavItem active={activeTab === 'dashboard'} icon={LayoutDashboard} label={t('admin.dashboard')} onClick={() => { setActiveTab('dashboard'); if(window.innerWidth < 1024) setIsSidebarOpen(false); }} />
           <NavItem active={false} icon={Layers} label="User Dashboard" onClick={() => { navigate('/dashboard'); if(window.innerWidth < 1024) setIsSidebarOpen(false); }} />
           <NavItem active={activeTab === 'users'} icon={Users} label={t('admin.users')} onClick={() => { setActiveTab('users'); if(window.innerWidth < 1024) setIsSidebarOpen(false); }} />
+          <NavItem active={activeTab === 'whatsapp'} icon={MessageCircle} label="WhatsApp Numbers" onClick={() => { setActiveTab('whatsapp'); if(window.innerWidth < 1024) setIsSidebarOpen(false); }} />
           <NavItem active={activeTab === 'affiliates'} icon={LinkIcon} label={t('admin.affiliates')} onClick={() => { setActiveTab('affiliates'); if(window.innerWidth < 1024) setIsSidebarOpen(false); }} badge={stats.pendingCommissions} />
           <NavItem active={activeTab === 'withdrawals'} icon={Wallet} label={t('admin.withdrawals')} onClick={() => { setActiveTab('withdrawals'); if(window.innerWidth < 1024) setIsSidebarOpen(false); }} badge={stats.pendingWithdrawals} />
 
@@ -382,7 +385,7 @@ export default function AdminDashboard() {
             >
               <Menu className="w-5 h-5" />
             </button>
-            <h1 className="font-serif font-bold text-xl text-slate-900 capitalize hidden sm:block">{activeTab === 'dashboard' ? t('admin.overview') : t(`admin.${activeTab}` as any)}</h1>
+            <h1 className="font-serif font-bold text-xl text-slate-900 capitalize hidden sm:block">{activeTab === 'dashboard' ? t('admin.overview') : activeTab === 'whatsapp' ? 'WhatsApp Numbers Directory' : t(`admin.${activeTab}` as any)}</h1>
           </div>
           <div className="flex items-center gap-3">
           </div>
@@ -398,7 +401,8 @@ export default function AdminDashboard() {
               transition={{ duration: 0.25 }}
             >
               {activeTab === 'dashboard' && <DashboardOverview stats={stats} onViewLedger={() => setActiveTab('payments')} />}
-              {activeTab === 'users' && <UsersManager requestClearance={requestSecurityClearance} />}
+              {activeTab === 'users' && <UsersManager requestClearance={requestSecurityClearance} onViewWhatsApp={() => setActiveTab('whatsapp')} />}
+              {activeTab === 'whatsapp' && <WhatsAppDirectoryManager />}
               {activeTab === 'affiliates' && (
                 <AffiliateManager requestClearance={requestSecurityClearance} />
               )}
@@ -754,7 +758,7 @@ function DashboardOverview({ stats, onViewLedger }: { stats: any; onViewLedger?:
   );
 }
 
-function UsersManager({ requestClearance }: { requestClearance: any }) {
+function UsersManager({ requestClearance, onViewWhatsApp }: { requestClearance: any; onViewWhatsApp?: () => void }) {
   const { t } = useLanguage();
   const navigate = useNavigate();
   const [users, setUsers] = useState<any[]>([]);
@@ -922,12 +926,35 @@ function UsersManager({ requestClearance }: { requestClearance: any }) {
           <option value="suspended">Suspended / Protocol Violation</option>
         </select>
         <button 
-          onClick={() => downloadCSV(users, 'institutional_users')}
-          className="bg-white border border-[#D8E3FF] text-slate-600 px-6 py-2.5 rounded-xl text-[13px] font-black uppercase tracking-widest hover:border-[#2563EB] hover:text-[#2563EB] transition-all flex items-center gap-2 shadow-sm"
+          onClick={() => {
+            const data = users.map(u => ({
+              'WhatsApp Number': (u.whatsapp || u.whatsappNumber || u.phone || '').trim(),
+              'Full Name': u.displayName || 'Scholar',
+              'Username': u.username || (u.displayName ? u.displayName.toLowerCase().replace(/\s+/g, '_') : '') || 'scholar',
+              'University': formatUniversityName(u.institutionalName || u.university),
+              'Department': u.department || 'General',
+              'Email': u.email || '',
+              'Role': u.role || 'student',
+              'Status': u.status || 'active'
+            }));
+            downloadCSV(data, 'scholars_directory_export');
+          }}
+          className="bg-white border border-[#D8E3FF] text-slate-600 px-6 py-2.5 rounded-xl text-[13px] font-black uppercase tracking-widest hover:border-[#2563EB] hover:text-[#2563EB] transition-all flex items-center gap-2 shadow-sm cursor-pointer"
         >
           <Download className="w-4 h-4" />
           {t('admin.export')}
         </button>
+        {onViewWhatsApp && (
+          <button 
+            type="button"
+            onClick={onViewWhatsApp}
+            className="bg-emerald-50 border border-emerald-200 text-emerald-700 px-5 py-2.5 rounded-xl text-[13px] font-black uppercase tracking-widest hover:bg-emerald-100 transition-all flex items-center gap-2 shadow-xs cursor-pointer"
+            title="Open WhatsApp Numbers Directory"
+          >
+            <MessageCircle className="w-4 h-4 text-emerald-600" />
+            WhatsApp Numbers
+          </button>
+        )}
         <button onClick={() => setShowAddModal(true)} className="bg-[#2563EB] hover:bg-[#1d4ed8] text-white px-6 py-2.5 rounded-xl text-[13px] font-black uppercase tracking-widest ml-auto shadow-lg shadow-[#2563EB]/20 hover:scale-105 active:scale-95 transition-all text-nowrap">+ {t('admin.addUser')}</button>
       </div>
 
@@ -979,7 +1006,16 @@ function UsersManager({ requestClearance }: { requestClearance: any }) {
                         </div>
                         <div>
                           <div className="text-[14px] font-bold text-slate-900 group-hover:text-[#2563EB] transition-colors">{u.displayName || t('profile.defaultName')}</div>
+                          {u.username && (
+                            <div className="text-[10px] text-slate-500 font-mono font-semibold">@{u.username}</div>
+                          )}
                           <div className="text-[11px] text-slate-400 font-mono italic">{u.email}</div>
+                          {(u.whatsapp || u.phone) && (
+                            <div className="text-[11px] text-emerald-600 font-mono font-bold flex items-center gap-1 mt-0.5">
+                              <MessageCircle className="w-3 h-3 text-emerald-500 shrink-0" />
+                              <span>{u.whatsapp || u.phone}</span>
+                            </div>
+                          )}
                         </div>
                       </div>
                     </td>
@@ -989,7 +1025,35 @@ function UsersManager({ requestClearance }: { requestClearance: any }) {
                         <span className="text-[12px] font-mono">{lastActive}</span>
                       </div>
                     </td>
-                    <td className="px-6 py-5 text-[13px] font-bold text-slate-500 uppercase tracking-wider">{u.department || '—'}</td>
+                    <td className="px-6 py-5">
+                      <div className="text-[13px] font-bold text-slate-700 uppercase tracking-wider">{u.department || '—'}</div>
+                      <div className="text-[11px] font-semibold text-[#2563EB] flex items-center gap-1.5">
+                        <span>{formatUniversityName(u.institutionalName || u.university)}</span>
+                        <button
+                          onClick={async () => {
+                            const currentUni = formatUniversityName(u.institutionalName || u.university);
+                            const newUni = prompt(`Edit university for ${u.displayName || u.username || 'user'}:`, currentUni);
+                            if (newUni && newUni.trim()) {
+                              const full = formatUniversityName(newUni.trim());
+                              try {
+                                await updateDoc(doc(db, 'users', u.id), {
+                                  institutionalName: full,
+                                  university: full,
+                                  updatedAt: new Date().toISOString()
+                                });
+                                alert(`University updated to ${full}`);
+                              } catch (e: any) {
+                                alert('Error updating university: ' + e.message);
+                              }
+                            }
+                          }}
+                          className="opacity-40 hover:opacity-100 text-slate-500 hover:text-[#2563EB] transition-opacity p-0.5 cursor-pointer"
+                          title="Edit University Name"
+                        >
+                          <Edit3 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </td>
                     <td className="px-6 py-5">
                       <div className="flex flex-col gap-1">
                         <span className={cn(
