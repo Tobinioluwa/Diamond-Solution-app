@@ -926,8 +926,11 @@ async function startServer() {
         }
       }
 
-      // Verification logic
-      const isSimulation = reference && reference.startsWith('sim_');
+      // Verification logic. Simulation references are a local-development convenience
+      // (see the "DEBUG MODE" dialogs in the client) and must never be honored in
+      // production - otherwise any signed-in user can grant themselves a paid course by
+      // submitting a fabricated sim_ reference, with no Paystack call ever made.
+      const isSimulation = process.env.NODE_ENV !== 'production' && !!reference && reference.startsWith('sim_');
       const noKey = !secretKey || 
                     secretKey === 'sk_test_placeholder' || 
                     secretKey === 'undefined' || 

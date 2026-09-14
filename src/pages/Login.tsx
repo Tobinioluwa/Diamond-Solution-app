@@ -478,11 +478,12 @@ export default function Login() {
 
         await res.user.getIdToken(true);
         sessionStorage.removeItem('diamond_onboard_shown');
-        if (userData?.status === 'suspended' || userData?.status === 'device_blocked' || userData?.deviceBlockPending) {
-          navigate('/reactivate');
-        } else {
-          navigate('/dashboard');
-        }
+        const destination = (userData?.status === 'suspended' || userData?.status === 'device_blocked' || userData?.deviceBlockPending)
+          ? '/reactivate'
+          : '/dashboard';
+        // Delay navigation so AuthContext's auth-state listener updates first - otherwise
+        // ProtectedRoute briefly still sees user=null and bounces straight back to /login.
+        setTimeout(() => navigate(destination), 500);
       } else {
         setError('No valid biometric credentials detected. Please log in with your email and password first.');
       }
@@ -611,11 +612,13 @@ export default function Login() {
         await res.user.getIdToken(true);
         // Clear session tour flag on explicit login as requested
         sessionStorage.removeItem('diamond_onboard_shown');
-        if (userData?.status === 'suspended' || userData?.status === 'device_blocked' || userData?.deviceBlockPending) {
-          navigate('/reactivate');
-        } else {
-          navigate('/dashboard');
-        }
+        const destination = (userData?.status === 'suspended' || userData?.status === 'device_blocked' || userData?.deviceBlockPending)
+          ? '/reactivate'
+          : '/dashboard';
+        // Delay navigation so AuthContext's auth-state listener updates first - otherwise
+        // ProtectedRoute briefly still sees user=null and bounces straight back to /login
+        // (same race the OTP device-verification path below already guards against).
+        setTimeout(() => navigate(destination), 500);
       } else {
         setSessionToken('PENDING_LOGIN'); // Bypass onSnapshot auto-logout
         const userCredential = await createUserWithEmailAndPassword(auth, email, password);

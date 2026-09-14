@@ -295,8 +295,13 @@ export default function Reactivation() {
                   onClick={() => {
                     const activeKey = dynamicPublicKey || import.meta.env.VITE_PAYSTACK_PUBLIC_KEY || '';
                     if (!activeKey || activeKey === 'pk_test_placeholder') {
-                      if (window.confirm("DEBUG MODE: Paystack key missing. Would you like to SIMULATE successful reactivation payment?")) {
+                      // Simulated payment is a local-dev-only convenience; never offer it in
+                      // production, where a missing key means payments are genuinely
+                      // misconfigured, not a cue to bypass them.
+                      if (import.meta.env.DEV && window.confirm("DEBUG MODE: Paystack key missing. Would you like to SIMULATE successful reactivation payment?")) {
                         onSuccess({ reference: 'sim_reactivate_' + Date.now() });
+                      } else if (!import.meta.env.DEV) {
+                        alert("Payments are temporarily unavailable. Please try again shortly or contact support.");
                       }
                       return;
                     }
@@ -468,8 +473,13 @@ export default function Reactivation() {
                   onClick={() => {
                     const activeKey = dynamicPublicKey || import.meta.env.VITE_PAYSTACK_PUBLIC_KEY || '';
                     if (!activeKey || activeKey === 'pk_test_placeholder') {
-                      if (window.confirm("DEBUG MODE: Paystack key missing. Would you like to SIMULATE successful reactivation payment?")) {
+                      // Simulated payment is a local-dev-only convenience; never offer it in
+                      // production, where a missing key means payments are genuinely
+                      // misconfigured, not a cue to bypass them.
+                      if (import.meta.env.DEV && window.confirm("DEBUG MODE: Paystack key missing. Would you like to SIMULATE successful reactivation payment?")) {
                         onSuccess({ reference: 'sim_reactivate_' + Date.now() });
+                      } else if (!import.meta.env.DEV) {
+                        alert("Payments are temporarily unavailable. Please try again shortly or contact support.");
                       }
                       return;
                     }

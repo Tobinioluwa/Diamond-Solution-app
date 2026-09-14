@@ -345,8 +345,12 @@ export default function CourseDetail() {
     
     const activeKey = dynamicPublicKey || import.meta.env.VITE_PAYSTACK_PUBLIC_KEY || '';
     if (!activeKey || activeKey === 'pk_test_placeholder') {
-      if (window.confirm("DEBUG MODE: Paystack key missing. SIMULATE course purchase?")) {
+      // Simulated payment is a local-dev-only convenience; never offer it in production,
+      // where a missing key means payments are genuinely misconfigured, not a cue to bypass them.
+      if (import.meta.env.DEV && window.confirm("DEBUG MODE: Paystack key missing. SIMULATE course purchase?")) {
         onSuccess({ reference: 'sim_course_' + Date.now() });
+      } else if (!import.meta.env.DEV) {
+        alert("Payments are temporarily unavailable. Please try again shortly or contact support.");
       }
       return;
     }
