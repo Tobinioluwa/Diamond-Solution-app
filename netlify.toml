@@ -1,6 +1,19 @@
 [build]
   command = "npm run build"
   publish = "dist"
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+
+# Forward every /api/* request to the Express app running as a Netlify Function.
+# This MUST come before the catch-all SPA redirect below - Netlify evaluates redirects
+# in order and uses the first match, so if the catch-all ran first, every API call would
+# get index.html back instead of reaching the function.
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
 
 [[redirects]]
   from = "/*"
