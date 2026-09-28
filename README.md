@@ -4,8 +4,11 @@ A study/exam-prep platform for students across Africa: structured course content
 quizzes, a leaderboard, an affiliate/referral program, and an admin back office.
 
 - **Frontend**: React 19 + Vite + Tailwind, client-side routed with `react-router-dom`.
-- **Backend**: A single Express server (`server.ts`) serving both the built frontend and a
-  small `/api/*` surface, using the **Firebase Admin SDK** for privileged operations.
+- **Backend**: A single Express app (routes in `server-app.ts`) providing a small `/api/*`
+  surface, using the **Firebase Admin SDK** for privileged operations. It runs two ways from
+  the same code: `server.ts` starts it as a long-running process (local dev, or any Node
+  host) serving the frontend too; `netlify/functions/api.ts` wraps it as a Netlify Function
+  for the actual Netlify deployment. See [Deployment](#deployment).
 - **Data**: Cloud Firestore (Native mode), Firebase Auth, Firebase Storage for media.
 - **Project home**: this app was built in Google AI Studio (`firebase-blueprint.json`,
   `firebase-applet-config.json`, `metadata.json` are AI Studio artifacts) and its Firestore
@@ -63,7 +66,9 @@ production (`import.meta.env.DEV` / `NODE_ENV !== 'production'`) — see
 ## Project structure
 
 ```
-server.ts                  Express app: static hosting + /api/* routes (Firebase Admin SDK)
+server-app.ts               Express app + all /api/* routes (Firebase Admin SDK)
+server.ts                  Long-running-process entry point: createApp() + static hosting
+netlify/functions/api.ts    Netlify Function entry point: createApp() wrapped with serverless-http
 firestore.rules             Firestore security rules (see "Security model" below)
 firebase-blueprint.json     AI Studio data-model blueprint (entity/schema reference)
 firebase-applet-config.json Public Firebase client config
@@ -98,7 +103,7 @@ src/
 ## Roles & admin access
 
 Three roles: `student` (default), `moderator`, `admin`. A user is treated as admin if **any**
-of the following is true (see `isAdmin()` in `firestore.rules`, `checkIsAdmin()` in `server.ts`,
+of the following is true (see `isAdmin()` in `firestore.rules`, `checkIsAdmin()` in `server-app.ts`,
 and the `isAdmin` value from `useAuth()` in `AuthContext.tsx`):
 
 1. Their `users/{uid}.role === 'admin'`.
@@ -139,11 +144,11 @@ active tab's listeners are mounted):
 - **System Logs** — audit trail of OTP dispatch, admin deletions, etc.
 - **Settings** — global app settings.
 
-## Backend API (`server.ts`)
+## Backend API (`server-app.ts`)
 
-All routes are mounted on the same Express app that also serves the built frontend.
-`verifyFirebaseToken` middleware validates the caller's Firebase ID token; admin-only routes
-additionally call `checkIsAdmin(uid)`.
+All routes are mounted on one Express app (see [Deployment](#deployment) for how it actually
+runs). `verifyFirebaseToken` middleware validates the caller's Firebase ID token; admin-only
+routes additionally call `checkIsAdmin(uid)`.
 
 | Route | Auth | Purpose |
 |---|---|---|
@@ -226,14 +231,70 @@ before touching real-time listeners:
   both sides now additionally require `import.meta.env.DEV` / `NODE_ENV !== 'production'`.
   Before this fix, any signed-in user could grant themselves a paid course for free by
   submitting a fabricated `sim_` reference directly to the endpoint, in any environment.
+- **A missing/invalid Paystack key was *also* silently granting success**, independent of the
+  `sim_` bypass above: `/api/verify-departmental-payment`'s `noKey` branch (when
+  `PAYSTACK_SECRET_KEY` isn't a real `sk_...` key) skipped the gateway verify call entirely
+  and fell through to `{success: true}` regardless of environment - so a misconfigured or
+  missing production key granted every course purchase for free, silently, with no error
+  anywhere. Same fix applied to `/api/payout`'s equivalent "no key, simulate" branch. Both
+  now refuse with a clear error in production instead of pretending to succeed.
+- **Two payment-record integrity gaps are still open, not yet fixed**: `firestore.rules`
+  currently lets any signed-in user `create` a `payments` doc with `status: 'success'`
+  directly (the server never writes this itself - see `CourseDetail.tsx`/`CourseList.tsx`'s
+  `onSuccess` handlers), and lets the *referred* user in an `affiliates` commission record
+  self-assign an arbitrary `commissionAmount` to any `referrerUid`. Combined with the
+  admin-approved payout flow, a fabricated commission is a path to a real Paystack transfer
+  if not caught before approval. The real fix is moving payment/commission record creation
+  into `/api/verify-departmental-payment` via the Admin SDK and tightening the rules to match
+  - flagged here so it isn't lost, not yet implemented.
+- **The `users` update rule's suspension/device-block gate was vacuous**: it allowed
+  `incoming().status` to be any of `['active', 'device_blocked', 'suspended']` unconditionally
+  — which is the complete set of valid values, so the clause never actually restricted
+  anything. A suspended or device-blocked user could set their own status back to `active`
+  directly, bypassing the reactivation payment entirely. Also flagged, not yet fixed — same
+  category of "a clause that reads like a filter but is true for every possible value" as the
+  `users` list-rule bug elsewhere in this file.
 
 ## Deployment
 
-- `netlify.toml` builds the frontend (`npm run build` → `dist/`) for static hosting on
-  Netlify; note this does **not** run the Express server, so any deployment target for this
-  app needs to run `server.ts`/`dist/server.cjs` (e.g. `npm run start`) to serve `/api/*`.
-- Given the AI Studio artifacts in this repo, this app may also be deployed/managed directly
-  through Google AI Studio's app hosting, which would run both the frontend and `server.ts`
-  together. Confirm which path is actually in use before assuming a `netlify.toml` change
-  alone will ship an update.
-- Firestore rules are a separate deploy step — see [Security model](#security-model) above.
+This app is deployed on **Netlify**, which only ever serves static files - it has no way to
+keep a Node process listening. Since all of `server.ts`'s API routes (`/api/*` - OTP,
+payment verification, payouts, admin actions, the WhatsApp webhook, everything) need a real
+server, the same Express app is also wrapped as a **Netlify Function**:
+
+- `server-app.ts` holds every route (this used to be the whole of `server.ts`) and exports
+  `createApp()`, which builds and returns the Express app without starting it or adding
+  static-file middleware.
+- `server.ts` is the thin entry point used for local dev (`npm run dev`) and for `npm run
+  build`/`npm run start` if this is ever run as a real long-running process on some other
+  host: it calls `createApp()`, then adds the Vite dev middleware (or static file serving +
+  SPA fallback in production) and `app.listen(...)`.
+- `netlify/functions/api.ts` is the serverless entry point: it wraps the same `createApp()`
+  with `serverless-http` and exports a Lambda-style `handler`.
+- `netlify.toml` redirects `/api/*` to that function (`/.netlify/functions/api/:splat`,
+  status 200) **before** the catch-all SPA redirect - order matters, since Netlify uses the
+  first matching redirect rule. Netlify passes the *original* request path to the function
+  in this case, so the Express routes (`/api/verify-departmental-payment`, etc.) don't need
+  any path rewriting to match.
+
+**Environment variables must be set in Netlify's own dashboard** (Site configuration →
+Environment variables) - this repo has no way to see or set them. That includes everything
+already documented above (Paystack, Brevo, Gemini, WhatsApp, `NODE_ENV=production`) plus one
+Netlify-Functions-specific addition:
+
+- `FIREBASE_SERVICE_ACCOUNT_KEY` - the full JSON contents of a Firebase service account key,
+  as one string. Netlify Functions run on AWS, not Google Cloud, so the automatic credential
+  discovery (Application Default Credentials) that works when this runs on a GCP-hosted
+  platform doesn't apply here - a real service account must be supplied explicitly, or every
+  Firestore/Auth Admin SDK call in `server-app.ts`'s `getFirestore()` fails. Generate one at
+  Firebase Console → (gear icon) Project settings → Service accounts tab → "Generate new
+  private key", then paste the entire downloaded JSON file's content as this variable's
+  value. Treat it like a password - anyone with it has full admin access to the Firestore
+  database and every user's Auth account.
+
+Netlify Functions also have a request timeout (10s on the free tier) - if a route ever needs
+to wait on a slow upstream call (Paystack, Brevo) longer than that, it will time out where a
+long-running Node process wouldn't have. Worth knowing if a request that works locally times
+out only in production.
+
+Firestore rules are a separate deploy step — see [Security model](#security-model) above.

@@ -83,7 +83,8 @@ export default function AdminDashboard() {
     pendingWithdrawals: 0,
     pendingSupports: 0,
     suspendedCount: 0,
-    totalPaidOut: '₦0'
+    totalPaidOut: '₦0',
+    paidEnrollments: 0
   });
 
   useEffect(() => {
@@ -114,6 +115,7 @@ export default function AdminDashboard() {
           withdrawalsNgnSnap,
           withdrawalsUsdSnap,
           chatsUnreadSnap,
+          paidEnrollmentsSnap,
         ] = await Promise.all([
           getCountFromServer(collection(db, 'users')),
           getCountFromServer(query(collection(db, 'users'), where('status', '==', 'suspended'))),
@@ -136,6 +138,7 @@ export default function AdminDashboard() {
             { total: sum('amount') }
           ),
           getAggregateFromServer(collection(db, 'chats'), { total: sum('adminUnreadCount') }),
+          getCountFromServer(query(collection(db, 'payments'), where('status', '==', 'success'))),
         ]);
 
         if (cancelled) return;
@@ -162,6 +165,7 @@ export default function AdminDashboard() {
           pendingWithdrawals: withdrawalsPendingSnap.data().count,
           totalPaidOut: displayTotalPaidOut,
           pendingSupports: chatsUnreadSnap.data().total || 0,
+          paidEnrollments: paidEnrollmentsSnap.data().count,
         }));
       } catch (err) {
         handleFirestoreError(err, OperationType.LIST, 'admin-stats');
@@ -1762,10 +1766,10 @@ function AnalyticsDashboard({ stats }: { stats: any }) {
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Live Revenue (MTD)" value={`₦${(stats.totalRevenue/1000).toLocaleString()}k`} sub="Verified success rate 99.1%" colorClass="text-emerald-600" />
+        <StatCard label="Live Revenue (All-time)" value={`₦${(stats.totalRevenue/1000).toLocaleString()}k`} sub={`${stats.paidEnrollments.toLocaleString()} successful payments`} colorClass="text-emerald-600" />
         <StatCard label="Scholarly Access" value={stats.totalStudents.toLocaleString()} sub="Institutional connections" colorClass="text-[#2563EB]" />
-        <StatCard label="Avg Enrollment" value="₦12.9k" sub="Mean tuition value" colorClass="text-[#2563EB]" />
-        <StatCard label="Suspension Rate" value="0.4%" sub="Violation deactivations" colorClass="text-red-500" />
+        <StatCard label="Paid Enrollments" value={stats.paidEnrollments.toLocaleString()} sub="Successful course payments" colorClass="text-[#2563EB]" />
+        <StatCard label="Suspension Rate" value={`${stats.totalStudents > 0 ? ((stats.suspendedCount / stats.totalStudents) * 100).toFixed(1) : '0.0'}%`} sub={`${stats.suspendedCount.toLocaleString()} suspended accounts`} colorClass="text-red-500" />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
