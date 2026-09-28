@@ -207,9 +207,9 @@ export default function CourseDetail() {
         return;
       }
 
-      // Handle Affiliate Sync Calculation
+      // Resolve which referrer (if any) to credit; the server looks up their real record
+      // itself before crediting commission, this just finds the candidate uid.
       let referrerUid = profile.referredByUid;
-      let referrerSnapData: any = null;
 
       if (!referrerUid && profile.referredBy) {
         let refCode = String(profile.referredBy).trim().toUpperCase().replace('-', '');
@@ -221,34 +221,8 @@ export default function CourseDetail() {
         const referrerSnap = await getDocs(referrerQuery);
         if (!referrerSnap.empty) {
           referrerUid = referrerSnap.docs[0].id;
-          referrerSnapData = referrerSnap.docs[0].data();
           try { await setDoc(doc(db, 'users', user.uid), { referredByUid: referrerUid }, { merge: true }); } catch (err) {}
         }
-      }
-
-      let referrerEmail = "";
-      let referrerName = "";
-      let finalCommissionValue = 0;
-      let referrerCurrency = 'NGN';
-
-      if (referrerUid) {
-        const referrerDoc = referrerSnapData ? null : await getDoc(doc(db, 'users', referrerUid));
-        const referrerData = referrerSnapData || referrerDoc?.data() || {};
-        referrerCurrency = referrerData.currency || 'NGN';
-        const commissionRate = 0.25;
-        let commissionAmount = displayPrice * commissionRate;
-        const NGN_TO_USD = 1500;
-        
-        let normalizedCommission = commissionAmount;
-        if (userCurrency !== referrerCurrency) {
-          if (userCurrency === 'USD' && referrerCurrency === 'NGN') normalizedCommission = commissionAmount * NGN_TO_USD;
-          else if (userCurrency === 'NGN' && referrerCurrency === 'USD') normalizedCommission = commissionAmount / NGN_TO_USD;
-        }
-        if (referrerCurrency === 'NGN') normalizedCommission = Math.floor(normalizedCommission);
-
-        referrerEmail = referrerData.email || "";
-        referrerName = referrerData.displayName || "Affiliate";
-        finalCommissionValue = normalizedCommission;
       }
 
       let finalRef = '';
@@ -256,11 +230,13 @@ export default function CourseDetail() {
       else if (reference && typeof reference === 'object') finalRef = reference.reference || reference.transaction || reference.trans || reference.trxref;
 
        const idToken = await user.getIdToken();
-       // Use backend for verification and email dispatch
+       // The backend independently verifies the reference with Paystack (status, amount,
+       // currency, one-time use) and writes the payments/users/affiliates records itself via
+       // the Admin SDK - Firestore rules no longer let the client write these directly, since
+       // that write is what previously let anyone grant themselves paid access for free.
        const response = await axios.post('/api/verify-departmental-payment', {
          reference: finalRef,
          department: course.department,
-         amount: displayPrice,
          currency: userCurrency,
          userData: {
            uid: user.uid,
@@ -268,58 +244,12 @@ export default function CourseDetail() {
            displayName: profile?.displayName || '',
            username: profile?.username || ''
          },
-         referrerEmail,
-         referrerName,
-         finalCommissionValue,
          referrerId: referrerUid
        }, {
          headers: { Authorization: `Bearer ${idToken}` }
        });
 
       if (response.data.success) {
-        // Record payment locally
-        await setDoc(doc(db, 'payments', paymentId), {
-          id: paymentId,
-          userId: user.uid,
-          amount: displayPrice,
-          currency: userCurrency,
-          status: 'success',
-          type: 'department_access',
-          dept_name: course.department,
-          department: course.department,
-          reference: reference.reference || reference,
-          courseId: id,
-          studentName: profile.displayName || 'Scholar',
-          email: user.email || 'no-email',
-          paidAt: new Date().toISOString(),
-          createdAt: new Date().toISOString()
-        });
-
-        // Mark user as paid
-        await setDoc(doc(db, 'users', user.uid), {
-          hasPaidCourse: true,
-          updatedAt: new Date().toISOString()
-        }, { merge: true });
-
-        // Record affiliate commission
-        if (referrerUid) {
-          const commissionId = `comm_${paymentId}`;
-          await setDoc(doc(db, 'affiliates', commissionId), {
-            id: commissionId,
-            referrerUid: referrerUid,
-            referrerName: referrerName,
-            referredUid: user.uid,
-            referredName: profile.displayName || 'Scholar',
-            paymentAmount: displayPrice,
-            paymentCurrency: userCurrency,
-            commissionAmount: finalCommissionValue,
-            commissionCurrency: referrerCurrency,
-            commissionRate: 0.25,
-            status: 'success',
-            createdAt: new Date().toISOString()
-          });
-        }
-
         alert('Institutional Access Granted! Launching study protocol...');
         setHasPaid(true);
         // Auto-launch the course

@@ -149,11 +149,22 @@ service cloud.firestore {
                     );
       
       allow update: if (
-        isOwner(userId) && 
+        isOwner(userId) &&
         (!('role' in incoming()) || incoming().role == existing().role) &&
         (!('balance' in incoming()) || incoming().balance == existing().balance) &&
         (!('email' in incoming()) || incoming().email == existing().email) &&
-        (!('status' in incoming()) || incoming().status == existing().status || incoming().status in ['active', 'device_blocked', 'suspended']) &&
+        // Status may only be self-escalated INTO a restricted state (e.g. the login flow
+        // flagging a third device as 'device_blocked'). Only the server (via Admin SDK,
+        // after real payment + OTP verification) may move a user OUT of 'suspended' or
+        // 'device_blocked' back to 'active' - otherwise a suspended user could just set
+        // their own status back to 'active' for free, which is exactly what happened before.
+        (!('status' in incoming()) ||
+         incoming().status == existing().status ||
+         (existing().get('status', 'active') == 'active' && incoming().status in ['device_blocked', 'suspended'])) &&
+        // hasPaidCourse and reactivationPaid gate real money-for-access flows and must only
+        // ever be set by the server after it has independently verified payment with Paystack.
+        (!('hasPaidCourse' in incoming()) || incoming().hasPaidCourse == existing().hasPaidCourse) &&
+        (!('reactivationPaid' in incoming()) || incoming().reactivationPaid == existing().reactivationPaid) &&
         (!('affiliateStatus' in existing()) ||
          incoming().affiliateStatus == existing().affiliateStatus ||
          incoming().affiliateStatus in ['none', 'pending', 'active'])
@@ -163,14 +174,14 @@ service cloud.firestore {
     }
 
     // --- Payments ---
+    // Every payment/access grant now flows through the backend, which independently
+    // verifies the transaction with Paystack (amount, currency, reference) before writing
+    // here via the Admin SDK (which bypasses these rules). Clients only ever read their own
+    // records - a client-writable 'status: success' document is exactly what let anyone
+    // grant themselves paid access for free, so there is no client create/update path here.
     match /payments/{paymentId} {
       allow read: if isAdmin() || (isSignedIn() && !isSuspended() && (resource == null || resource.data.userId == request.auth.uid));
-      allow create: if isVerified() && 
-                    (!isSuspended() || (incoming().purpose in ['reactivation', 'device_reactivation'] && (incoming().amount == 1000 || incoming().amount == 2))) && 
-                    isValidPayment(incoming()) && 
-                    (incoming().status == 'pending' || incoming().status == 'success') &&
-                    (!('courseId' in incoming()) || incoming().courseId == 'all_dept' || exists(/databases/$(database)/documents/courses/$(incoming().courseId)));
-      allow update: if isAdmin();
+      allow create, update: if isAdmin();
     }
 
     // --- Withdrawals ---
@@ -261,11 +272,14 @@ service cloud.firestore {
       }
     }
 
-    // --- Affiliates ---
+    // --- Affiliates (commission records) ---
+    // A client 'create' here only ever needed referredUid == self, which meant anyone could
+    // mint themselves (or an accomplice account) unlimited withdrawable commission just by
+    // writing the document directly. Commission is only ever computed and credited by the
+    // server, from a payment it independently verified, via the Admin SDK.
     match /affiliates/{affId} {
       allow read: if isAdmin() || (isSignedIn() && !isSuspended() && resource.data.referrerUid == request.auth.uid);
-      allow create: if isSignedIn() && !isSuspended() && incoming().referredUid == request.auth.uid;
-      allow update, delete: if isAdmin();
+      allow create, update, delete: if isAdmin();
     }
 
     // --- Study Progress ---
