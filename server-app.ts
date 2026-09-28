@@ -12,9 +12,43 @@ import { GoogleGenAI } from "@google/genai";
 import { BrevoClient } from "@getbrevo/brevo";
 
 import firebaseAppletConfig from "./firebase-applet-config.json";
+import { DEPARTMENT_PRICES } from "./src/constants";
 
 let dbInstance: any = null;
 const memoryOtpCache = new Map<string, any>();
+
+const NGN_TO_USD = 1500;
+const AFFILIATE_COMMISSION_RATE = 0.25;
+
+// The price a department/course actually costs, as the server trusts it - never the client's
+// claimed "amount". Custom faculties (admin-added, priced via the `faculties` collection)
+// override the static DEPARTMENT_PRICES map, mirroring the merge logic the client uses to
+// display prices in CourseList.tsx.
+async function getDepartmentPrice(db: any, department: string): Promise<{ ngn: number; usd: number } | null> {
+  try {
+    const facultySnap = await db.collection("faculties").where("name", "==", department).limit(1).get();
+    if (!facultySnap.empty) {
+      const data = facultySnap.docs[0].data();
+      if (!data.isDeleted) {
+        const ngn = data.price || DEPARTMENT_PRICES[department]?.ngn || 10000;
+        const usd = data.priceUSD || DEPARTMENT_PRICES[department]?.usd || Math.ceil(ngn / NGN_TO_USD);
+        return { ngn, usd };
+      }
+    }
+  } catch (err: any) {
+    console.error("[getDepartmentPrice] Faculty lookup failed:", err.message);
+  }
+  return DEPARTMENT_PRICES[department] || null;
+}
+
+function computeCommission(price: number, userCurrency: string, referrerCurrency: string): number {
+  let commission = price * AFFILIATE_COMMISSION_RATE;
+  if (userCurrency !== referrerCurrency) {
+    if (userCurrency === "USD" && referrerCurrency === "NGN") commission *= NGN_TO_USD;
+    else if (userCurrency === "NGN" && referrerCurrency === "USD") commission /= NGN_TO_USD;
+  }
+  return referrerCurrency === "NGN" ? Math.floor(commission) : commission;
+}
 
 const getBrevoConfig = () => {
   let apiKey = (process.env.BREVO_API_KEY || "").trim();
@@ -852,6 +886,40 @@ export async function createApp() {
         return res.status(403).json({ error: "Access Denied: You must purchase at least one departmental course to unlock affiliate payout privileges." });
       }
 
+      // Enforce the affiliate's REAL balance server-side. The withdrawal request's "amount"
+      // field was only ever bounded by a balance the client computed from the same
+      // (forgeable) commission records - never a real check. Recompute the ground truth here
+      // from actual successful commissions minus actual successful prior payouts.
+      const commissionsSnap = await db.collection("affiliates")
+        .where("referrerUid", "==", targetUserId)
+        .where("status", "==", "success")
+        .get().catch((err: any) => {
+          console.error("[Payout] Firestore affiliates lookup failed closed:", err.message);
+          throw new Error("DURABLE_STORE_CONNECTIVITY_ERROR");
+        });
+      const totalEarned = commissionsSnap.docs.reduce((sum: number, d: any) => {
+        const data = d.data();
+        return (data.commissionCurrency || 'NGN') === currency ? sum + (data.commissionAmount || 0) : sum;
+      }, 0);
+
+      const priorWithdrawalsSnap = await db.collection("withdrawals")
+        .where("userId", "==", targetUserId)
+        .where("status", "==", "success")
+        .get().catch((err: any) => {
+          console.error("[Payout] Firestore withdrawals lookup failed closed:", err.message);
+          throw new Error("DURABLE_STORE_CONNECTIVITY_ERROR");
+        });
+      const totalWithdrawn = priorWithdrawalsSnap.docs.reduce((sum: number, d: any) => {
+        const data = d.data();
+        return (data.currency || 'NGN') === currency ? sum + (data.amount || 0) : sum;
+      }, 0);
+
+      const realBalance = totalEarned - totalWithdrawn;
+      if (amount > realBalance) {
+        console.error(`[Payout] Requested payout ${amount} ${currency} exceeds real balance ${realBalance} ${currency} for user ${targetUserId}.`);
+        return res.status(400).json({ error: "Requested amount exceeds this affiliate's verified commission balance." });
+      }
+
       if (currency === "USD" && amount < 10) {
         return res.status(400).json({ error: "The minimum payout amount for USD is $10." });
       } else if (currency === "NGN" && amount < 10000) {
@@ -919,7 +987,13 @@ export async function createApp() {
     }
   });
 
-  // Course payment verification
+  // Course payment verification. This endpoint is now the ONLY place a department payment
+  // is ever granted - it independently verifies the transaction with Paystack (status,
+  // amount, currency, one-time use) and writes the resulting payments/users/affiliates
+  // records itself via the Admin SDK. The client no longer writes any of these documents;
+  // Firestore rules block it from doing so (see firestore.rules), because a client-writable
+  // "status: success" record is exactly what previously let anyone grant themselves paid
+  // access, or mint themselves affiliate commission, for free.
   app.post("/api/verify-departmental-payment", verifyFirebaseToken, async (req, res) => {
     try {
       const parsedBody = z.object({
@@ -931,28 +1005,40 @@ export async function createApp() {
           username: z.string().optional()
         }),
         department: z.string().min(1, "Department is required"),
-        amount: z.number().positive(),
-        currency: z.string().min(2),
-        referrerEmail: z.string().email().or(z.literal("")).optional().nullable(),
-        referrerName: z.string().optional().nullable(),
-        finalCommissionValue: z.number().nonnegative().optional().nullable(),
+        currency: z.enum(["NGN", "USD"]),
         referrerId: z.string().optional().nullable()
       }).parse(req.body);
 
-      const { reference, userData, department, amount, currency, referrerEmail, referrerName, finalCommissionValue, referrerId } = parsedBody;
+      const { reference, userData, department, currency, referrerId } = parsedBody;
       const secretKey = process.env.PAYSTACK_SECRET_KEY;
+      const uid = (req as any).uid;
 
-      if (userData.uid !== (req as any).uid) {
-        const isAdminUser = await checkIsAdmin((req as any).uid);
+      if (userData.uid !== uid) {
+        const isAdminUser = await checkIsAdmin(uid);
         if (!isAdminUser) {
           return res.status(403).json({ error: "Forbidden: You can only verify payments for your own account." });
         }
       }
 
-      // Verification logic. Simulation references are a local-development convenience
-      // (see the "DEBUG MODE" dialogs in the client) and must never be honored in
-      // production - otherwise any signed-in user can grant themselves a paid course by
-      // submitting a fabricated sim_ reference, with no Paystack call ever made.
+      const db = await getFirestore();
+      const paymentId = `dept_pay_${userData.uid}_${department}`;
+      const paymentRef = db.collection("payments").doc(paymentId);
+
+      const existingPayment = await paymentRef.get();
+      if (existingPayment.exists && existingPayment.data()?.status === 'success') {
+        return res.json({ success: true, alreadyGranted: true });
+      }
+
+      const priceInfo = await getDepartmentPrice(db, department);
+      if (!priceInfo) {
+        return res.status(400).json({ error: "Unknown department." });
+      }
+      const expectedPrice = currency === 'USD' ? priceInfo.usd : priceInfo.ngn;
+
+      // Simulation references are a local-development convenience (see the "DEBUG MODE"
+      // dialogs in the client) and must never be honored in production - otherwise any
+      // signed-in user can grant themselves a paid course by submitting a fabricated sim_
+      // reference, with no Paystack call ever made.
       const isSimulation = process.env.NODE_ENV !== 'production' && !!reference && reference.startsWith('sim_');
       const noKey = !secretKey ||
                     secretKey === 'sk_test_placeholder' ||
@@ -961,40 +1047,109 @@ export async function createApp() {
                     secretKey === '' ||
                     !secretKey.startsWith('sk_');
 
-      console.log(`[Paystack Verify] Reference: ${reference}, Type: ${typeof reference}, isSimulation: ${isSimulation}, noKey: ${noKey}`);
+      console.log(`[Paystack Verify] Reference: ${reference}, department: ${department}, isSimulation: ${isSimulation}, noKey: ${noKey}`);
 
-      if (!isSimulation && !noKey) {
-        try {
-          const verifyRes = await axios.get(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
-            headers: { Authorization: `Bearer ${secretKey}` }
-          });
-          if (verifyRes.data.data.status !== "success") {
-            return res.status(400).json({ error: "Payment failed at gateway: " + (verifyRes.data.data.gateway_response || 'Unknown') });
-          }
-        } catch (verifyErr: any) {
-          console.error("Paystack verification API returned an error:", verifyErr.response?.data || verifyErr.message);
-          let paystackErrMsg = verifyErr.response?.data?.message || verifyErr.message;
-          const isMerchantKeyError = verifyErr.response?.data?.code === 'invalid_Key' ||
-                                     paystackErrMsg === 'Invalid key' ||
-                                     verifyErr.response?.status === 401 ||
-                                     verifyErr.response?.data?.type === 'validation_error';
-
-          if (isMerchantKeyError) {
-            console.warn("[PAYSTACK MERCH KEY WARNING] The PAYSTACK_SECRET_KEY set in environment is invalid (invalid_Key). Granting user access anyway to prevent locking out paying students.");
-          } else {
-            return res.status(400).json({ error: paystackErrMsg });
-          }
-        }
-      } else if (noKey && process.env.NODE_ENV === 'production') {
+      if (noKey && process.env.NODE_ENV === 'production') {
         console.error("[Paystack Verify] PAYSTACK_SECRET_KEY is missing or invalid in production - refusing to grant access without real verification.");
         return res.status(500).json({ error: "Payment gateway is not configured. Please contact support before retrying." });
       }
 
-      // 3. Dispatch Emails (Upline & Admin)
+      if (!isSimulation && !noKey) {
+        let txData: any;
+        try {
+          const verifyRes = await axios.get(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
+            headers: { Authorization: `Bearer ${secretKey}` }
+          });
+          txData = verifyRes.data?.data;
+        } catch (verifyErr: any) {
+          // A failed verification call - for ANY reason, including an invalid merchant key -
+          // must never be treated as proof of payment. Failing open here (as this endpoint
+          // used to on an "invalid_Key" response) is exactly what let a misconfigured secret
+          // key turn every payment attempt into a free pass.
+          console.error("[Paystack Verify] Verification API call failed:", verifyErr.response?.data || verifyErr.message);
+          return res.status(502).json({ error: "Could not verify payment with the payment gateway. Please contact support before retrying." });
+        }
+
+        if (!txData || txData.status !== "success") {
+          return res.status(400).json({ error: "Payment failed at gateway: " + (txData?.gateway_response || 'Unknown') });
+        }
+
+        // Amount/currency must match what this department actually costs - the client's
+        // claimed price is never trusted for granting access, otherwise a token payment
+        // could be submitted as "proof" of a full-price purchase.
+        if (txData.currency !== currency || txData.amount !== expectedPrice * 100) {
+          console.error(`[Paystack Verify] Amount mismatch for ${reference}: expected ${expectedPrice * 100} ${currency}, gateway reports ${txData.amount} ${txData.currency}`);
+          return res.status(400).json({ error: "Payment amount does not match the department fee." });
+        }
+
+        // Anti-replay: a single successful reference must not be usable to grant more than
+        // one payment record, otherwise one real transaction could be resubmitted to unlock
+        // every department for free.
+        const priorUse = await db.collection("payments").where("reference", "==", reference).limit(5).get();
+        const alreadyConsumed = priorUse.docs.some((d: any) => d.id !== paymentId && d.data()?.status === 'success');
+        if (alreadyConsumed) {
+          return res.status(400).json({ error: "This payment reference has already been used." });
+        }
+      }
+      // isSimulation and the dev-only missing-key path intentionally skip real verification.
+
+      const now = new Date().toISOString();
+      let referrerData: any = null;
+      let referrerCurrency = 'NGN';
+      let commissionAmount = 0;
+
+      if (referrerId && referrerId !== userData.uid) {
+        const referrerSnap = await db.collection("users").doc(referrerId).get();
+        if (referrerSnap.exists) {
+          referrerData = referrerSnap.data();
+          referrerCurrency = referrerData.currency || 'NGN';
+          commissionAmount = computeCommission(expectedPrice, currency, referrerCurrency);
+        }
+      }
+
+      await paymentRef.set({
+        id: paymentId,
+        userId: userData.uid,
+        amount: expectedPrice,
+        currency,
+        status: 'success',
+        type: 'department_access',
+        dept_name: department,
+        department,
+        reference,
+        courseId: 'all_dept',
+        studentName: userData.displayName || 'Scholar',
+        email: userData.email,
+        paidAt: now,
+        createdAt: now
+      });
+
+      await db.collection("users").doc(userData.uid).set({ hasPaidCourse: true, updatedAt: now }, { merge: true });
+
+      if (referrerData) {
+        const commissionId = `comm_${paymentId}`;
+        await db.collection("affiliates").doc(commissionId).set({
+          id: commissionId,
+          referrerUid: referrerId,
+          referrerName: referrerData.displayName || 'Affiliate',
+          referredUid: userData.uid,
+          referredName: userData.displayName || 'Scholar',
+          paymentAmount: expectedPrice,
+          paymentCurrency: currency,
+          commissionAmount,
+          commissionCurrency: referrerCurrency,
+          commissionRate: AFFILIATE_COMMISSION_RATE,
+          status: 'success',
+          createdAt: now
+        });
+      }
+
+      // Dispatch Emails (Upline & Admin) - best-effort, never blocks the response. Referrer
+      // identity/email come from the Firestore doc the server just looked up, not from
+      // anything the client claimed.
       if (brevoClient) {
         try {
           const senderEmail = await resolveBrevoSender();
-          // Send Admin Purchase Email
           const adminEmail = 'peteradekunle923@gmail.com';
           brevoClient.transactionalEmails.sendTransacEmail({
             sender: { email: senderEmail, name: 'Diamond Solution' },
@@ -1009,9 +1164,9 @@ export async function createApp() {
                   <p style="margin: 0 0 10px 0;"><strong>Student Name:</strong> ${userData?.displayName || "Scholar"}</p>
                   <p style="margin: 0 0 10px 0;"><strong>Student Email:</strong> ${userData?.email || "No email"}</p>
                   <p style="margin: 0 0 10px 0;"><strong>Department:</strong> ${department || "N/A"}</p>
-                  <p style="margin: 0 0 10px 0;"><strong>Amount Paid:</strong> ${currency === "USD" ? "$" : "₦"}${amount?.toLocaleString()}</p>
+                  <p style="margin: 0 0 10px 0;"><strong>Amount Paid:</strong> ${currency === "USD" ? "$" : "₦"}${expectedPrice.toLocaleString()}</p>
                   <p style="margin: 0 0 10px 0;"><strong>Reference ID:</strong> ${reference || "N/A"}</p>
-                  <p style="margin: 0;"><strong>Referred By:</strong> ${referrerId ? `Yes (ID: ${referrerId})` : "No"}</p>
+                  <p style="margin: 0;"><strong>Referred By:</strong> ${referrerData ? `Yes (ID: ${referrerId})` : "No"}</p>
                 </div>
                 <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 25px 0;" />
                 <p style="font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 2px; text-align: center; margin: 0;">Administrator Control Board • Diamond Solution</p>
@@ -1019,22 +1174,21 @@ export async function createApp() {
             `
           }).catch(err => console.error("Could not send admin path email:", formatBrevoError(err)));
 
-          // Send Referrer Commission Email if referrerEmail exists
-          let referrerCurrencySymbol = currency === 'USD' ? '$' : '₦';
-          if (referrerId && referrerEmail) {
+          if (referrerData?.email) {
+            const referrerCurrencySymbol = referrerCurrency === 'USD' ? '$' : '₦';
             brevoClient.transactionalEmails.sendTransacEmail({
               sender: { email: senderEmail, name: 'Diamond Solution' },
-              to: [{ email: referrerEmail }],
+              to: [{ email: referrerData.email }],
               subject: `Commission Earned: 25% Rewards Dispatched!`,
               htmlContent: `
                 <div style="font-family: sans-serif; padding: 25px; color: #0a0c10; max-width: 600px; margin: auto; border: 1px solid #10b981; border-radius: 12px; background-color: #ffffff;">
                   <h2 style="color: #10b981; border-bottom: 2px solid #10b981; padding-bottom: 10px; margin-top: 0;">New Reward Commission! 🎁</h2>
-                  <p>Dear ${referrerName},</p>
+                  <p>Dear ${referrerData.displayName || 'Affiliate'},</p>
                   <p>We are excited to inform you that a student you referred (<strong>${userData?.displayName || "Scholar"}</strong>) has purchased a course in <strong>${department || "Department"}</strong>.</p>
                   <p>As part of the Diamond Solution referral program, your 25% commission has been calculated and successfully credited to your affiliate wallet.</p>
                   <div style="background-color: #f0fdf4; padding: 20px; border-radius: 8px; margin: 25px 0; border-left: 4px solid #10b981; text-align: center;">
                     <span style="font-size: 13px; color: #15803d; text-transform: uppercase; font-weight: bold; letter-spacing: 1px; display: block; margin-bottom: 5px;">Your Net Reward</span>
-                    <span style="font-size: 32px; font-weight: 900; color: #15803d;">${referrerCurrencySymbol}${finalCommissionValue?.toLocaleString()}</span>
+                    <span style="font-size: 32px; font-weight: 900; color: #15803d;">${referrerCurrencySymbol}${commissionAmount.toLocaleString()}</span>
                   </div>
                   <p>Check your **Affiliate Terminal** in the app to view your net balance, update your payment authority details, and place withdrawal requests.</p>
                   <p>Thank you for helping us grow!</p>
@@ -1055,6 +1209,168 @@ export async function createApp() {
         return res.status(400).json({ error: error.issues[0].message });
       }
       console.error("[Course Payment] error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Reactivation fee verification (suspension unblock, or the first step of a device-block
+  // unblock). Like course payments, this used to be a pure client-side Firestore write with
+  // no Paystack check at all - a suspended user could just set their own status back to
+  // 'active'. Now the server independently verifies the reference before writing anything.
+  app.post("/api/verify-reactivation-payment", verifyFirebaseToken, async (req, res) => {
+    try {
+      const { reference } = z.object({
+        reference: z.string().min(1, "Reference is required")
+      }).parse(req.body);
+
+      const uid = (req as any).uid;
+      const secretKey = process.env.PAYSTACK_SECRET_KEY;
+
+      const db = await getFirestore();
+      const userRef = db.collection("users").doc(uid);
+      const userSnap = await userRef.get();
+      if (!userSnap.exists) {
+        return res.status(404).json({ error: "User profile not found." });
+      }
+      const userData = userSnap.data() || {};
+
+      const isDeviceBlocked = userData.status === 'device_blocked' || userData.deviceBlockPending === true;
+      if (userData.status !== 'suspended' && !isDeviceBlocked) {
+        return res.status(400).json({ error: "This account is not currently restricted - nothing to reactivate." });
+      }
+
+      // Mirrors exactly what the client sends to Paystack in Reactivation.tsx: no explicit
+      // currency is set on the Paystack config there, so the charge always settles in NGN,
+      // with the USD fee converted to its NGN-equivalent for non-Nigerian accounts.
+      const isNigerian = userData.country === 'Nigeria' || !userData.country;
+      const feeNGN = 1000;
+      const feeUSD = 2;
+      const expectedAmount = isNigerian ? feeNGN * 100 : Math.round(feeUSD * NGN_TO_USD * 100);
+      const expectedCurrency = 'NGN';
+
+      const isSimulation = process.env.NODE_ENV !== 'production' && reference.startsWith('sim_');
+      const noKey = !secretKey ||
+                    secretKey === 'sk_test_placeholder' ||
+                    secretKey === 'undefined' ||
+                    secretKey === 'null' ||
+                    secretKey === '' ||
+                    !secretKey.startsWith('sk_');
+
+      if (noKey && process.env.NODE_ENV === 'production') {
+        console.error("[Reactivation Payment] PAYSTACK_SECRET_KEY is missing or invalid in production - refusing to grant access without real verification.");
+        return res.status(500).json({ error: "Payment gateway is not configured. Please contact support before retrying." });
+      }
+
+      if (!isSimulation && !noKey) {
+        let txData: any;
+        try {
+          const verifyRes = await axios.get(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
+            headers: { Authorization: `Bearer ${secretKey}` }
+          });
+          txData = verifyRes.data?.data;
+        } catch (verifyErr: any) {
+          console.error("[Reactivation Payment] Verification API call failed:", verifyErr.response?.data || verifyErr.message);
+          return res.status(502).json({ error: "Could not verify payment with the payment gateway. Please contact support before retrying." });
+        }
+
+        if (!txData || txData.status !== "success") {
+          return res.status(400).json({ error: "Payment failed at gateway: " + (txData?.gateway_response || 'Unknown') });
+        }
+        if (txData.currency !== expectedCurrency || txData.amount !== expectedAmount) {
+          console.error(`[Reactivation Payment] Amount mismatch for ${reference}: expected ${expectedAmount} ${expectedCurrency}, gateway reports ${txData.amount} ${txData.currency}`);
+          return res.status(400).json({ error: "Payment amount does not match the reactivation fee." });
+        }
+
+        const existing = await db.collection("payments").doc(reference).get();
+        if (existing.exists && existing.data()?.status === 'success') {
+          return res.status(400).json({ error: "This payment reference has already been used." });
+        }
+      }
+
+      const now = new Date().toISOString();
+      const purpose = isDeviceBlocked ? 'device_reactivation' : 'reactivation';
+
+      await db.collection("payments").doc(reference).set({
+        userId: uid,
+        email: userData.email || null,
+        amount: expectedAmount / 100,
+        currency: expectedCurrency,
+        purpose,
+        status: 'success',
+        reference,
+        createdAt: now
+      });
+
+      if (!isDeviceBlocked) {
+        await userRef.set({ status: 'active', suspensionReason: null, reactivatedAt: now, lastStudyDate: now }, { merge: true });
+      } else {
+        await userRef.set({ reactivationPaid: true }, { merge: true });
+      }
+
+      res.json({ success: true, isDeviceBlocked });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.issues[0].message });
+      }
+      console.error("[Reactivation Payment] error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Final step of a device-block reactivation: consumes the short-lived token issued by
+  // /api/otp/verify (proof the user controls their registered email) to atomically swap the
+  // registered device and restore access. Doing this server-side, gated on that token,
+  // closes the gap where a client could otherwise just call updateDoc directly to reactivate
+  // without ever completing the OTP step.
+  app.post("/api/complete-device-reactivation", verifyFirebaseToken, async (req, res) => {
+    try {
+      const { token, deviceId } = z.object({
+        token: z.string().min(1, "Verification token is required"),
+        deviceId: z.string().min(1, "deviceId is required")
+      }).parse(req.body);
+
+      const uid = (req as any).uid;
+
+      let payload: any;
+      try {
+        payload = jwt.verify(token, JWT_SECRET);
+      } catch (err) {
+        return res.status(400).json({ error: "Invalid or expired verification token. Please request a new code." });
+      }
+
+      if (!payload?.verified || payload.purpose !== 'device_reactivation' || payload.userId !== uid) {
+        return res.status(403).json({ error: "Verification token does not match this request." });
+      }
+
+      const db = await getFirestore();
+      const userRef = db.collection("users").doc(uid);
+      const userSnap = await userRef.get();
+      if (!userSnap.exists) {
+        return res.status(404).json({ error: "User profile not found." });
+      }
+      const userData = userSnap.data() || {};
+
+      if (userData.reactivationPaid !== true) {
+        return res.status(403).json({ error: "Reactivation fee has not been confirmed as paid." });
+      }
+
+      const now = new Date().toISOString();
+      await userRef.set({
+        status: 'active',
+        deviceBlockPending: false,
+        blockedUntil: null,
+        reactivationPaid: false,
+        registeredDeviceIds: [deviceId],
+        reactivatedAt: now,
+        lastStudyDate: now
+      }, { merge: true });
+
+      res.json({ success: true });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.issues[0].message });
+      }
+      console.error("[Complete Device Reactivation] error:", error);
       res.status(500).json({ error: error.message });
     }
   });
