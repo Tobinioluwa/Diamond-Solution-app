@@ -2,12 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
-import { db } from '../lib/firebase';
-import { doc, updateDoc, setDoc } from 'firebase/firestore';
 import { usePaystackPayment } from 'react-paystack';
 import { ShieldAlert, CreditCard, Loader2, Globe, Clock, Banknote, Mail, CheckCircle2, AlertTriangle, Monitor } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { handleFirestoreError, OperationType } from '../lib/firebaseUtils';
 import axios from 'axios';
 import { getOrGenerateDeviceId } from '../utils/deviceHelper';
 
@@ -27,6 +24,7 @@ export default function Reactivation() {
   const [otpVerified, setOtpVerified] = useState(false);
   const [otpError, setOtpError] = useState('');
   const [otpSuccessMsg, setOtpSuccessMsg] = useState('');
+  const [otpToken, setOtpToken] = useState('');
 
   const isDeviceBlocked = profile?.status === 'device_blocked' || profile?.deviceBlockPending;
 
@@ -98,39 +96,33 @@ export default function Reactivation() {
   const onSuccess = async (reference: any) => {
     setLoading(true);
     try {
-      const now = new Date().toISOString();
-      
-      // Log payment record in firestore
-      await setDoc(doc(db, 'payments', reference.reference), {
-        userId: user?.uid,
-        email: user?.email,
-        amount: isNigerian ? feeNGN : feeUSD,
-        currency,
-        purpose: isDeviceBlocked ? 'device_reactivation' : 'reactivation',
-        status: 'success',
-        reference: reference.reference,
-        createdAt: now
+      const finalRef = typeof reference === 'string' ? reference : (reference.reference || reference.transaction || reference.trans || reference.trxref);
+      const idToken = await user!.getIdToken();
+      // The backend independently verifies the reference with Paystack (status, amount,
+      // currency, one-time use) before writing the payment record or touching the account's
+      // status - this used to be a pure client-side write with no verification at all, which
+      // meant a suspended account could just set itself back to 'active' for free.
+      const response = await axios.post('/api/verify-reactivation-payment', {
+        reference: finalRef
+      }, {
+        headers: { Authorization: `Bearer ${idToken}` }
       });
 
-      if (!isDeviceBlocked) {
-        // Standard suspension unblock immediately
-        await setDoc(doc(db, 'users', user!.uid), {
-          status: 'active',
-          suspensionReason: null,
-          reactivatedAt: now,
-          lastStudyDate: now
-        }, { merge: true });
+      if (!response.data.success) {
+        setOtpError('Payment verification failed. Please contact support.');
+        return;
+      }
+
+      if (!response.data.isDeviceBlocked) {
         window.location.href = '/dashboard';
       } else {
         // Device block: flag as paid and request OTP
         setPaystackPaid(true);
-        await updateDoc(doc(db, 'users', user!.uid), {
-          reactivationPaid: true
-        });
         await handleRequestOtp();
       }
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, 'users');
+    } catch (err: any) {
+      console.error(err);
+      setOtpError(err?.response?.data?.error || 'Failed to verify payment. Please contact support.');
     } finally {
       setLoading(false);
     }
@@ -170,6 +162,7 @@ export default function Reactivation() {
       });
       if (res.data.success) {
         setOtpVerified(true);
+        setOtpToken(res.data.token || '');
         setOtpSuccessMsg('Code verified successfully.');
       }
     } catch (err: any) {
@@ -184,17 +177,17 @@ export default function Reactivation() {
     setLoading(true);
     try {
       const currentDeviceId = getOrGenerateDeviceId();
-      const now = new Date().toISOString();
+      const idToken = await user!.getIdToken();
 
-      // Reset block status, clear all previous registered devices, and add only the current one
-      await updateDoc(doc(db, 'users', user!.uid), {
-        status: 'active',
-        deviceBlockPending: false,
-        blockedUntil: null,
-        reactivationPaid: false,
-        registeredDeviceIds: [currentDeviceId],
-        reactivatedAt: now,
-        lastStudyDate: now
+      // Consumes the short-lived token from /api/otp/verify to atomically swap the
+      // registered device and restore access server-side - this used to be a direct
+      // Firestore write the client could make on its own, without ever having proven it
+      // completed the OTP step.
+      await axios.post('/api/complete-device-reactivation', {
+        token: otpToken,
+        deviceId: currentDeviceId
+      }, {
+        headers: { Authorization: `Bearer ${idToken}` }
       });
 
       // Start fresh unique session to immediately logout other devices
@@ -202,9 +195,9 @@ export default function Reactivation() {
       await SessionService.startSession(user!.uid);
 
       window.location.href = '/dashboard';
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      setOtpError('Failed to complete reactivation. Please contact support.');
+      setOtpError(err?.response?.data?.error || 'Failed to complete reactivation. Please contact support.');
     } finally {
       setLoading(false);
     }

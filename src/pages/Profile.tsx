@@ -77,6 +77,7 @@ export default function Profile() {
            <div className="bg-white rounded-3xl border border-[#D8E3FF] divide-y divide-[#D8E3FF] shadow-xs overflow-hidden">
                <NavItem icon={Bell} label={t('profile.notifications')} to="/notifications" />
                <NavItem icon={History} label={t('profile.activityLog')} to="/activity-log" />
+               <NavItem icon={CreditCard} label="Payment History" to="/payments" />
                <NavItem icon={Shield} label={t('profile.account')} to="/account" border={false} />
            </div>
         </section>

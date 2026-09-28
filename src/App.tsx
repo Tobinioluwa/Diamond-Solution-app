@@ -20,6 +20,7 @@ const Notifications = React.lazy(() => import('./pages/Notifications'));
 const AccountSettings = React.lazy(() => import('./pages/AccountSettings'));
 const Reactivation = React.lazy(() => import('./pages/Reactivation'));
 const Leaderboard = React.lazy(() => import('./pages/Leaderboard'));
+const PaymentHistory = React.lazy(() => import('./pages/PaymentHistory'));
 
 const PageLoader = () => (
   <div className="fixed inset-0 bg-[#07101F] flex flex-col items-center justify-center z-50 px-4">
@@ -98,6 +99,7 @@ export default function App() {
               <Route path="/chat" element={<ProtectedRoute><Chat /></ProtectedRoute>} />
               <Route path="/notifications" element={<ProtectedRoute><Notifications /></ProtectedRoute>} />
               <Route path="/account" element={<ProtectedRoute><AccountSettings /></ProtectedRoute>} />
+              <Route path="/payments" element={<ProtectedRoute><PaymentHistory /></ProtectedRoute>} />
               <Route path="/reactivate" element={<ProtectedRoute><Reactivation /></ProtectedRoute>} />
               <Route path="/leaderboard" element={<ProtectedRoute><Leaderboard /></ProtectedRoute>} />
               <Route path="/admin" element={<AdminRoute><AdminDashboard /></AdminRoute>} />
