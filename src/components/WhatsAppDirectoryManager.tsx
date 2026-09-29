@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { collection, onSnapshot } from 'firebase/firestore';
+import { collection, getDocs } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { handleFirestoreError, OperationType } from '../lib/firebaseUtils';
 import { downloadCSV } from '../lib/csvUtils';
@@ -25,8 +25,10 @@ export function WhatsAppDirectoryManager() {
   const [copiedAll, setCopiedAll] = useState(false);
 
   useEffect(() => {
-    const unsub = onSnapshot(
-      collection(db, 'users'),
+    // One-time load, not a live listener: this collection scales with every account ever
+    // created, so subscribing live here re-reads the ENTIRE users collection on every single
+    // write to it anywhere in the app, for as long as this admin tab stays open.
+    getDocs(collection(db, 'users')).then(
       (snap) => {
         const loaded: WhatsAppUser[] = [];
         snap.docs.forEach((docSnap) => {
@@ -53,13 +55,12 @@ export function WhatsAppDirectoryManager() {
         setUsers(loaded);
         setLoading(false);
       },
+    ).catch(
       (err) => {
         handleFirestoreError(err, OperationType.LIST, 'users');
         setLoading(false);
       }
     );
-
-    return () => unsub();
   }, []);
 
   const filtered = users.filter((u) => {
