@@ -15,7 +15,7 @@ import {
 import { format } from 'date-fns';
 import { downloadCSV } from '../lib/csvUtils';
 import axios from 'axios';
-import { cn } from '../lib/utils';
+import { cn, formatFormattedText } from '../lib/utils';
 import { handleFirestoreError, OperationType } from '../lib/firebaseUtils';
 import { motion, AnimatePresence } from 'motion/react';
 import { useLanguage } from '../context/LanguageContext';
@@ -2764,25 +2764,25 @@ function QuestionsManager({ initialFilter, requestClearance }: { initialFilter: 
       ...questions.map(q => {
         const row = isAppQuestion
           ? [
-              q.question || '',
-              q.answerText || q.explanation || ''
+              formatFormattedText(q.question) || '',
+              formatFormattedText(q.answerText || q.explanation) || ''
             ]
           : [
-              q.question || '',
-              q.options?.[0] || '',
-              q.options?.[1] || '',
-              q.options?.[2] || '',
-              q.options?.[3] || '',
-              q.options?.[4] || '',
+              formatFormattedText(q.question) || '',
+              formatFormattedText(q.options?.[0]) || '',
+              formatFormattedText(q.options?.[1]) || '',
+              formatFormattedText(q.options?.[2]) || '',
+              formatFormattedText(q.options?.[3]) || '',
+              formatFormattedText(q.options?.[4]) || '',
               q.correctAnswer?.toString() || '0',
-              q.explanation || ''
+              formatFormattedText(q.explanation) || ''
             ];
         return row.map(cell => `"${(cell + '').replace(/"/g, '""')}"`).join(',');
       })
     ];
 
-    const csvContent = csvRows.join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const csvContent = csvRows.join('\r\n');
+    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -2797,14 +2797,14 @@ function QuestionsManager({ initialFilter, requestClearance }: { initialFilter: 
       : ["Question", "Option A", "Option B", "Option C", "Option D", "Option E", "Correct Answer (A-E or 0-4)", "Explanation"];
     
     const csvContent = isAppQuestion
-      ? headers.join(',') + '\n"Describe the core process...","The core process starts by..."'
-      : headers.join(',') + '\n"Sample Question?","Option 1","Option 2","Option 3","Option 4","Option 5","A","Because it is A"';
+      ? headers.join(',') + '\r\n"1. Describe the key concepts of the system architecture.\n\n2. Outline the security mechanisms and data flow.","1. Key concepts:\n- Microservices decoupling\n- Event-driven processing\n\n2. Security mechanisms:\n- End-to-end token verification\n- Role-based archive clearance"'
+      : headers.join(',') + '\r\n"Sample Question?","Option 1","Option 2","Option 3","Option 4","Option 5","A","Because it is A"';
       
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = "question_import_template.csv";
+    link.download = isAppQuestion ? "application_question_template.csv" : "question_import_template.csv";
     link.click();
   };
 
@@ -2837,15 +2837,15 @@ function QuestionsManager({ initialFilter, requestClearance }: { initialFilter: 
           
           let correctIdx = 0;
           let expectedAnswer = '';
-          let questionContent = (row[0] !== undefined && row[0] !== null) ? row[0] : 'Untitled Question';
+          let questionContent = formatFormattedText(row[0]) || 'Untitled Question';
           
           if (isAppQuestion) {
             // For application questions:
             // If 2 columns: column 0 is Question, column 1 is Expected Answer
             // If template with 8 columns: column 1 or column 7 could have expected answer
             expectedAnswer = (row[1] !== undefined && row[1] !== null && row[1] !== '') 
-              ? row[1] 
-              : (row[7] !== undefined && row[7] !== null ? row[7] : '');
+              ? formatFormattedText(row[1]) 
+              : (row[7] !== undefined && row[7] !== null ? formatFormattedText(row[7]) : '');
           } else {
             const val = row[6]?.toString().trim().toUpperCase();
             if (['A', 'B', 'C', 'D', 'E'].includes(val)) {
@@ -2859,10 +2859,16 @@ function QuestionsManager({ initialFilter, requestClearance }: { initialFilter: 
           batch.set(newDocRef, {
             type: isAppQuestion ? 'application' : 'objective',
             question: questionContent,
-            options: isAppQuestion ? [] : [row[1] || 'Opt A', row[2] || 'Opt B', row[3] || 'Opt C', row[4] || 'Opt D', row[5] || 'Opt E'],
+            options: isAppQuestion ? [] : [
+              formatFormattedText(row[1]) || 'Opt A',
+              formatFormattedText(row[2]) || 'Opt B',
+              formatFormattedText(row[3]) || 'Opt C',
+              formatFormattedText(row[4]) || 'Opt D',
+              formatFormattedText(row[5]) || 'Opt E'
+            ],
             correctAnswer: isAppQuestion ? 0 : correctIdx,
             answerText: isAppQuestion ? expectedAnswer : '',
-            explanation: isAppQuestion ? '' : (row[7] || ''),
+            explanation: isAppQuestion ? '' : formatFormattedText(row[7] || ''),
             courseId: activeCourse.id,
             order: currentOrder++,
             createdAt: new Date().toISOString()
@@ -3084,14 +3090,22 @@ function QuestionsManager({ initialFilter, requestClearance }: { initialFilter: 
     }
     const path = `courses/${activeCourse.id}/content`;
     try {
+      const questionPayload = {
+        ...newQuestion,
+        question: formatFormattedText(newQuestion.question),
+        answerText: formatFormattedText(newQuestion.answerText),
+        explanation: formatFormattedText(newQuestion.explanation),
+        options: (newQuestion.options || []).map(opt => formatFormattedText(opt))
+      };
+
       if (editingQuestionId) {
         await updateDoc(doc(db, 'courses', activeCourse.id, 'content', editingQuestionId), {
-          ...newQuestion,
+          ...questionPayload,
           updatedAt: new Date().toISOString()
         });
       } else {
         await addDoc(collection(db, 'courses', activeCourse.id, 'content'), {
-          ...newQuestion,
+          ...questionPayload,
           courseId: activeCourse.id,
           order: questions.length + 1,
           createdAt: new Date().toISOString()
@@ -3616,12 +3630,12 @@ function QuestionsManager({ initialFilter, requestClearance }: { initialFilter: 
                           <span className="w-8 h-8 rounded-lg bg-[#EEF3FF] border border-[#D8E3FF] flex items-center justify-center text-[#2563EB] font-mono text-[10px] font-black shrink-0">
                             {idx + 1}
                           </span>
-                          <h4 className="text-[15px] font-medium text-slate-900 leading-relaxed whitespace-pre-wrap">{q.question}</h4>
+                          <h4 className="text-[15px] font-medium text-slate-900 leading-relaxed whitespace-pre-wrap font-sans">{formatFormattedText(q.question)}</h4>
                         </div>
                         {q.type === 'application' ? (
-                          <div className="ml-12 p-4 bg-white rounded-xl border border-[#D8E3FF] text-[12px] text-emerald-700 whitespace-pre-wrap leading-relaxed">
-                            <span className="font-black uppercase tracking-widest text-[9px] block mb-1 text-[#2563EB]">Expected Answer</span>
-                            {q.answerText || q.explanation}
+                          <div className="ml-12 p-5 bg-white rounded-2xl border border-[#D8E3FF] text-[13px] text-slate-800 whitespace-pre-wrap leading-relaxed font-sans shadow-xs">
+                            <span className="font-black uppercase tracking-widest text-[9px] block mb-2 text-[#2563EB]">Expected Answer</span>
+                            {formatFormattedText(q.answerText || q.explanation)}
                           </div>
                         ) : (
                           <div className="grid grid-cols-2 gap-3 ml-12">
@@ -3629,22 +3643,22 @@ function QuestionsManager({ initialFilter, requestClearance }: { initialFilter: 
                               <div 
                                 key={oi} 
                                 className={cn(
-                                  "p-3 rounded-xl border text-[12px] transition-all whitespace-pre-wrap",
+                                  "p-3 rounded-xl border text-[12px] transition-all whitespace-pre-wrap font-sans",
                                   oi === q.correctAnswer 
                                     ? "bg-emerald-50 border-emerald-300 text-emerald-700 font-bold" 
                                     : "bg-white border-[#D8E3FF] text-slate-600"
                                 )}
                               >
                                 <span className="font-mono text-[10px] mr-2 opacity-50">{['A', 'B', 'C', 'D', 'E'][oi]}.</span>
-                                {opt}
+                                {formatFormattedText(opt)}
                               </div>
                             ))}
                           </div>
                         )}
                         {q.explanation && (
-                          <div className="ml-12 p-4 bg-white rounded-xl border border-[#D8E3FF] text-[11px] text-slate-500 italic whitespace-pre-wrap leading-relaxed">
+                          <div className="ml-12 p-4 bg-white rounded-xl border border-[#D8E3FF] text-[12px] text-slate-600 whitespace-pre-wrap leading-relaxed font-sans shadow-xs">
                             <span className="font-black uppercase tracking-widest text-[9px] block mb-1 text-[#2563EB]">{t('admin.explanation')}</span>
-                            {q.explanation}
+                            {formatFormattedText(q.explanation)}
                           </div>
                         )}
                       </div>
@@ -4187,7 +4201,7 @@ function QuestionsManager({ initialFilter, requestClearance }: { initialFilter: 
                     value={newQuestion.question}
                     onChange={e => setNewQuestion({ ...newQuestion, question: e.target.value })}
                     placeholder="Enter the examination question..."
-                    className="w-full bg-[#EEF3FF] border border-[#D8E3FF] rounded-2xl p-6 text-[15px] text-slate-900 focus:border-[#2563EB] outline-none min-h-[120px] resize-none"
+                    className="w-full bg-[#EEF3FF] border border-[#D8E3FF] rounded-2xl p-6 text-[15px] text-slate-900 focus:border-[#2563EB] outline-none min-h-[140px] resize-y"
                    />
                  </div>
 
@@ -4199,7 +4213,7 @@ function QuestionsManager({ initialFilter, requestClearance }: { initialFilter: 
                       value={newQuestion.answerText}
                       onChange={e => setNewQuestion({ ...newQuestion, answerText: e.target.value })}
                       placeholder="Enter the expected answer logic here..."
-                      className="w-full bg-[#EEF3FF] border border-[#D8E3FF] rounded-2xl p-4 text-sm text-emerald-700 focus:border-emerald-500 outline-none min-h-[100px] resize-none"
+                      className="w-full bg-[#EEF3FF] border border-[#D8E3FF] rounded-2xl p-4 text-sm text-slate-800 focus:border-emerald-500 outline-none min-h-[120px] resize-y"
                      />
                    </div>
                  ) : (

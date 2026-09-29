@@ -87,7 +87,7 @@ src/
 | `users/{uid}` | Profile, `role` (`student`/`moderator`/`admin`), balance, affiliate status, suspension state, session token. See `firebase-blueprint.json` for the full schema. |
 | `dailyPractice/{uid}_{yyyy-mm-dd}` | One doc per user per day: `attempted`, `correct`, `studyDuration` (seconds). Written by `StudyPage.tsx` while a user practices; also the source for the leaderboard and the admin "Most Active Scholars" analytics. |
 | `login_events/{autoId}` | One small doc per sign-in — `{ uid, timestamp, dateKey, hour }` — written by `SessionService.startSession()`. Powers the admin "visit frequency / peak hours" charts. Read-only to admins, write-only (own doc) to the signed-in user. |
-| `payments/{id}` | Course/reactivation payments (Paystack). |
+| `payments/{id}` | Course/reactivation payments (Paystack). Client-writable in neither case - only the server writes `status: 'success'` here, via the Admin SDK, after independently verifying the transaction. See [Payment & access model](#payment--access-model) below. |
 | `withdrawals/{id}` | Affiliate payout requests. |
 | `courses/{id}` + `courses/{id}/content/{id}` | Course catalogue and gated question content. |
 | `faculties/{id}` | Departments/faculties and their pricing. |
@@ -154,12 +154,97 @@ routes additionally call `checkIsAdmin(uid)`.
 |---|---|---|
 | `GET /api/health` | none | Liveness check |
 | `POST /api/otp/request` | none (rate-limited) | Generates + emails an OTP for a purpose (device verification, reactivation, password change) |
+| `POST /api/otp/verify` | none (rate-limited) | Checks a 6-digit code, returns a short-lived (15 min) signed JWT proving that purpose was verified for that user - consumed by `/api/complete-device-reactivation` |
 | `POST /api/send-otp` | none | Sends a specific OTP code by email |
+| `POST /api/verify-departmental-payment` | Firebase ID token | The **only** place a course/department purchase is granted - see [Payment & access model](#payment--access-model) |
+| `POST /api/verify-reactivation-payment` | Firebase ID token | The **only** place a suspension/device-block reactivation fee is granted - see [Payment & access model](#payment--access-model) |
+| `POST /api/complete-device-reactivation` | Firebase ID token | Final step of a device-block reactivation: consumes the OTP JWT from `/api/otp/verify` to swap the registered device and restore access |
 | `POST /api/activate-affiliate` | Firebase ID token | Activates affiliate status for self, or (admins) another user |
-| `POST /api/payout` | Firebase ID token (rate-limited) | Initiates a Paystack payout for self, or (admins) another user |
+| `POST /api/payout` | Firebase ID token (rate-limited) | Initiates a Paystack payout for self, or (admins) another user, after recomputing their real commission balance server-side |
 | `POST /api/translate` | none | Gemini-powered French translation of quiz content |
 | `POST /api/admin/delete-user` | Firebase ID token, **admin only** | Deletes a user's Firebase Auth account + their `users/`/`admins/` Firestore docs. Client SDKs can't delete another user's Auth account — this is why it's a server route. |
 | `POST /api/public-profiles` | Firebase ID token (any signed-in user) | Given a batch of user IDs, returns **only** `displayName`/`department`/`role` for each. Used by the leaderboard, dashboard, and admin analytics so the client never needs a broad Firestore read on `users` (which also holds email/balance/bank details) just to show a name. |
+
+## Payment & access model
+
+**The current model is one-time, per-department, lifetime access — not a subscription.**
+There is no expiry field anywhere in the schema and no time-based check anywhere in the code.
+Once a student pays for a department, they keep access to it forever, unless an admin
+suspends their account (which blocks the whole account, not just that department) or deletes
+them. If the intent is for access to expire (e.g. per academic year), that is **not
+implemented** - see "If you want time-limited access instead" below.
+
+### How a purchase happens
+
+1. **Client** (`CourseList.tsx` / `CourseDetail.tsx`) opens the Paystack checkout widget for
+   the department's price (from `DEPARTMENT_PRICES` in `src/constants.ts`, or a `faculties/{id}`
+   doc if an admin has overridden that department's price).
+2. On Paystack success, the client calls `POST /api/verify-departmental-payment` with just the
+   `reference`, `department`, `currency`, and the referrer's uid (if any) - **not** the amount.
+3. The server (`server-app.ts`) is the only thing that grants access. It:
+   - Looks up the department's real price itself (`getDepartmentPrice()` - same
+     `faculties`-override-else-`DEPARTMENT_PRICES` logic as the client, so nobody can pay a
+     token amount and claim a full-price purchase).
+   - Calls Paystack's `/transaction/verify/:reference` directly with the secret key, and checks
+     `status === "success"` **and** that the verified `amount`/`currency` match the department's
+     real price exactly.
+   - Checks the reference hasn't already been used for a different payment record (no
+     replaying one real transaction to unlock multiple departments).
+   - Only then writes, via the Admin SDK (which bypasses `firestore.rules` entirely - the
+     client cannot perform any of these writes itself, see [Security model](#security-model)):
+     - `payments/dept_pay_{uid}_{department}` with `status: 'success'` - this exact doc ID and
+       status is what `firestore.rules` checks to gate `courses/{id}/content/{id}` reads, i.e.
+       **this document *is* the department's access grant**.
+     - `users/{uid}.hasPaidCourse = true` - a coarser "has paid for *something*" flag used by
+       the affiliate program gate and the payout eligibility check, not per-department.
+     - `affiliates/comm_{paymentId}` - the referrer's commission, computed server-side from the
+       verified price (never trusts a client-supplied commission amount).
+4. Reactivation (after a suspension or a third-device block) works the same way through
+   `/api/verify-reactivation-payment`, writing `payments/{reference}` and either
+   `users.status = 'active'` (standard suspension) or `users.reactivationPaid = true` (device
+   block, which then requires completing OTP verification via `/api/complete-device-reactivation`
+   before the device swap actually happens).
+
+### How access is actually enforced
+
+Two independent checks, both server/rules-side - the client's UI state is just a reflection
+of these, never the source of truth:
+
+- **Content gating**: `firestore.rules`' `courses/{id}/content/{id}` `allow read` checks for a
+  `payments/dept_pay_{uid}_{department}` doc with `status == "success"` (or the legacy
+  per-course `payments/{uid}_{courseId}` form). This is the actual paywall.
+- **`hasPaidCourse`**: gates the affiliate program and payout eligibility, not course content.
+  Only ever set by the server (`firestore.rules` blocks a user from setting this on their own
+  `users` doc).
+
+### How a returning user checks what they've paid for
+
+- **Payment History page** (`/payments`, `src/pages/PaymentHistory.tsx`, linked from Profile) -
+  lists every payment on the account (department/purpose, amount, date, reference, status)
+  with a printable receipt. This is the direct answer to "how do I know if I've paid before."
+- **The course list itself** (`/courses` → pick a department) shows an "Authorized" badge and
+  unlocks content immediately for any department with a successful payment - this is a live
+  Firestore listener on the user's own `payments` docs (`where('userId', '==', uid)`), so it's
+  always current, not cached.
+- There is currently **no explicit "your access is valid until X" indicator anywhere**, because
+  there is no "until X" - access doesn't expire. If that's surprising, see below.
+
+### If you want time-limited access instead
+
+Nothing about the write path stops you from adding an `expiresAt` timestamp to the payment
+grant, but three places would all need to agree on it, or a user could still get permanent
+access through whichever one lags behind:
+
+1. `firestore.rules`' `courses/{id}/content/{id}` read check would need
+   `get(...).data.expiresAt > request.time` alongside the existing `status == "success"` check.
+2. `/api/verify-departmental-payment` would need to write that `expiresAt` when granting access.
+3. Something (a scheduled Cloud Function, or a check on next login) would need to flip
+   `hasPaidCourse`/`status` back when access lapses, since nothing currently re-checks a grant
+   after it's made.
+
+Flagging this as a deliberate design question rather than implementing it speculatively - the
+one-time-fee model may well be the intended business model (the client UI already labels it
+"One-Time" fee), in which case there's nothing to fix here.
 
 ## Security model
 
@@ -238,22 +323,57 @@ before touching real-time listeners:
   missing production key granted every course purchase for free, silently, with no error
   anywhere. Same fix applied to `/api/payout`'s equivalent "no key, simulate" branch. Both
   now refuse with a clear error in production instead of pretending to succeed.
-- **Two payment-record integrity gaps are still open, not yet fixed**: `firestore.rules`
-  currently lets any signed-in user `create` a `payments` doc with `status: 'success'`
-  directly (the server never writes this itself - see `CourseDetail.tsx`/`CourseList.tsx`'s
-  `onSuccess` handlers), and lets the *referred* user in an `affiliates` commission record
-  self-assign an arbitrary `commissionAmount` to any `referrerUid`. Combined with the
-  admin-approved payout flow, a fabricated commission is a path to a real Paystack transfer
-  if not caught before approval. The real fix is moving payment/commission record creation
-  into `/api/verify-departmental-payment` via the Admin SDK and tightening the rules to match
-  - flagged here so it isn't lost, not yet implemented.
-- **The `users` update rule's suspension/device-block gate was vacuous**: it allowed
+- **[FIXED] Two payment-record integrity gaps**: `firestore.rules` used to let any signed-in
+  user `create` a `payments` doc with `status: 'success'` directly (the server never wrote
+  this itself), and let the *referred* user in an `affiliates` commission record self-assign
+  an arbitrary `commissionAmount` to any `referrerUid` - combined with the admin-approved
+  payout flow, a fabricated commission was a path to a real Paystack transfer if not caught
+  before approval. Fixed by moving all payment/commission record creation into
+  `/api/verify-departmental-payment` (and the reactivation equivalent) via the Admin SDK, and
+  restricting `firestore.rules` so `payments`/`affiliates` can only be written by an admin (the
+  server bypasses rules via the Admin SDK, so this doesn't block the legitimate write path).
+  See [Payment & access model](#payment--access-model) above.
+- **[FIXED] The `users` update rule's suspension/device-block gate was vacuous**: it allowed
   `incoming().status` to be any of `['active', 'device_blocked', 'suspended']` unconditionally
   — which is the complete set of valid values, so the clause never actually restricted
   anything. A suspended or device-blocked user could set their own status back to `active`
-  directly, bypassing the reactivation payment entirely. Also flagged, not yet fixed — same
-  category of "a clause that reads like a filter but is true for every possible value" as the
-  `users` list-rule bug elsewhere in this file.
+  directly, bypassing the reactivation payment entirely — same category of "a clause that
+  reads like a filter but is true for every possible value" as the `users` list-rule bug
+  elsewhere in this file. Fixed: a user can now only self-escalate `status` *into* a
+  restricted state (`active` → `device_blocked`/`suspended`); only the server can move it back
+  out, and only after real payment (+ OTP, for the device-block path) verification.
+- **The live Firestore database's rules had drifted further than the repo's `firestore.rules`
+  file.** The two fixes above were written and merged into this repo well before the *deployed*
+  rules were updated to match - editing `firestore.rules` here does nothing to the live
+  database until someone explicitly publishes it (see "Deploying rule changes" above). Worse,
+  when the deployed rules were finally compared against this file, the live version turned out
+  to also have `allow get: if true` on `/users/{userId}` (any signed-out client could read any
+  user's profile by UID) and an `allow list` clause containing a stray `|| true` (making the
+  whole condition unconditionally true for any signed-in user - i.e. the entire `users`
+  collection was listable by any student). Neither of those ever existed in this repo's
+  `firestore.rules`; they were changes made directly against the live database outside of this
+  codebase. **Lesson: after any `firestore.rules` edit, read back the actual deployed rules
+  from the Firebase Console and diff them against the file in this repo - don't assume they
+  match.**
+- **A second, unbounded-Firestore-listener outage, distinct from the leaderboard/dashboard fix
+  above.** `AdminDashboard.tsx` (and, missed in the first pass, `WhatsAppDirectoryManager.tsx`)
+  held at least 9 separate `onSnapshot` listeners subscribed to entire collections
+  (`users`, `payments`, `withdrawals`, `affiliates`, `chats`) with no `where()`/`limit()`. Each
+  one re-reads the whole collection the moment its tab mounts, then stays live and
+  re-delivers on *every* write to that collection anywhere in the app - every student login,
+  every payment - for as long as any admin has that tab open. This is what actually exhausted
+  the Firestore free-tier daily read quota (60k reads in a day against a 50k limit) and took
+  the whole app down, project-wide, until the quota reset - confirmed against the Firebase
+  usage graph, where total reads spiked to 60k while "real-time" listener reads were only
+  ~6.3k, i.e. it was repeated full-collection *loads*, not steady live traffic. Fixed by
+  converting all of them to one-time `getDocs()` loads; left `faculties`/`courses` (small,
+  admin-curated catalogs that don't scale with user/payment volume) as live listeners. See the
+  git history for `AdminDashboard.tsx`/`WhatsAppDirectoryManager.tsx` for the specific commits.
+  **This project's Firestore database also runs on an AI-Studio-provisioned shared quota (see
+  the project description at the top of this file), not a standalone billed Firebase project -
+  the quota-exceeded error explicitly stated billing would not lift the limit. If usage grows,
+  migrating to a standalone Firebase project may be necessary, not just optimizing reads
+  further.**
 
 ## Deployment
 
