@@ -630,8 +630,11 @@ function DashboardOverview({ stats, onViewLedger }: { stats: any; onViewLedger?:
   const [revenueBreakdown, setRevenueBreakdown] = useState<any[]>([]);
 
   useEffect(() => {
-    // Consolidated Payments Listener
-    const unsubPayments = onSnapshot(collection(db, 'payments'), (snap) => {
+    // One-time load, not a live listener: this collection scales with every payment ever
+    // made, so subscribing live here meant Firestore re-delivered the ENTIRE payments
+    // collection on every single write to it, for as long as this tab stayed open - the
+    // dashboard overview doesn't need live-to-the-second numbers.
+    getDocs(collection(db, 'payments')).then((snap) => {
       // 1. Recent Payments (Latest 5)
       const all = snap.docs.map(doc => ({ id: doc.id, ...doc.data() })) as any[];
       const sorted = [...all]
@@ -646,7 +649,7 @@ function DashboardOverview({ stats, onViewLedger }: { stats: any; onViewLedger?:
       // 2. Revenue Breakdown
       const breakdown: Record<string, { enrolled: number, amount: number }> = {};
       let maxAmount = 0;
-      
+
       snap.docs.forEach(doc => {
         const data = doc.data();
         if (data.status === 'success' && data.dept_name) {
@@ -669,13 +672,9 @@ function DashboardOverview({ stats, onViewLedger }: { stats: any; onViewLedger?:
         }))
         .sort((a, b) => b.amount - a.amount)
         .slice(0, 6);
-      
-      setRevenueBreakdown(revenueSorted);
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'payments'));
 
-    return () => {
-      unsubPayments();
-    };
+      setRevenueBreakdown(revenueSorted);
+    }).catch((err) => handleFirestoreError(err, OperationType.LIST, 'payments'));
   }, []);
 
   return (
@@ -791,9 +790,13 @@ function UsersManager({ requestClearance, onViewWhatsApp }: { requestClearance: 
   }, [showAddModal]);
 
   useEffect(() => {
-    return onSnapshot(collection(db, 'users'), (snap) => {
+    // One-time load, not a live listener: this collection scales with every account ever
+    // created, so subscribing live here meant Firestore re-delivered the ENTIRE users
+    // collection on every single write to it (every login, every profile edit, everywhere in
+    // the app) for as long as this tab stayed open. Use the refresh button to re-sync.
+    getDocs(collection(db, 'users')).then((snap) => {
       setUsers(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'users'));
+    }).catch((err) => handleFirestoreError(err, OperationType.LIST, 'users'));
   }, []);
 
   useEffect(() => {
@@ -1332,22 +1335,23 @@ function AffiliateManager({ requestClearance }: { requestClearance: any }) {
   const [partners, setPartners] = useState<any[]>([]);
 
   useEffect(() => {
-    const unsubComm = onSnapshot(collection(db, 'affiliates'), (snap) => {
+    // affiliates/withdrawals scale with every commission and payout request ever made -
+    // one-time loads, not live listeners, for the same reason as the payments/users fixes
+    // above. The isPartner-scoped users query stays live since it's a small, bounded subset.
+    getDocs(collection(db, 'affiliates')).then((snap) => {
       setAffiliates(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'affiliates'));
+    }).catch((err) => handleFirestoreError(err, OperationType.LIST, 'affiliates'));
 
     const unsubPartners = onSnapshot(query(collection(db, 'users'), where('isPartner', '==', true)), (snap) => {
       setPartners(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'users'));
 
-    const unsubPayouts = onSnapshot(collection(db, 'withdrawals'), (snap) => {
+    getDocs(collection(db, 'withdrawals')).then((snap) => {
       setPayouts(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'withdrawals'));
+    }).catch((err) => handleFirestoreError(err, OperationType.LIST, 'withdrawals'));
 
     return () => {
-      unsubComm();
       unsubPartners();
-      unsubPayouts();
     };
   }, []);
 
@@ -1498,7 +1502,8 @@ function PaymentsManager() {
   const [gateway, setGateway] = useState('');
 
   useEffect(() => {
-    return onSnapshot(collection(db, 'payments'), (snap) => {
+    // One-time load, not a live listener - see the note on the same pattern in UsersManager.
+    getDocs(collection(db, 'payments')).then((snap) => {
       const all = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       const sorted = all.sort((a: any, b: any) => {
         const dateA = new Date(a.paidAt || a.createdAt || 0).getTime();
@@ -1506,7 +1511,7 @@ function PaymentsManager() {
         return dateB - dateA;
       });
       setPayments(sorted);
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'payments'));
+    }).catch((err) => handleFirestoreError(err, OperationType.LIST, 'payments'));
   }, []);
 
   const filteredPayments = payments.filter((p) => {
@@ -1723,8 +1728,9 @@ function AnalyticsDashboard({ stats }: { stats: any }) {
   }, [engagementPeriod]);
 
   useEffect(() => {
+    // One-time loads, not live listeners - see the note on the same pattern in UsersManager.
     // Process Revenue History
-    const unsubPayments = onSnapshot(collection(db, 'payments'), (snap) => {
+    getDocs(collection(db, 'payments')).then((snap) => {
       const monthly = new Array(12).fill(0);
       snap.docs.forEach(doc => {
         const data = doc.data();
@@ -1738,10 +1744,10 @@ function AnalyticsDashboard({ stats }: { stats: any }) {
       });
       const maxRev = Math.max(...monthly, 1);
       setRevenueData(monthly.map(v => (v / maxRev) * 100));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'payments'));
+    }).catch((err) => handleFirestoreError(err, OperationType.LIST, 'payments'));
 
     // Process Withdrawal History
-    const unsubWithdrawals = onSnapshot(collection(db, 'withdrawals'), (snap) => {
+    getDocs(collection(db, 'withdrawals')).then((snap) => {
       const monthly = new Array(12).fill(0);
       snap.docs.forEach(doc => {
         const data = doc.data();
@@ -1755,12 +1761,7 @@ function AnalyticsDashboard({ stats }: { stats: any }) {
       });
       const maxPay = Math.max(...monthly, 1);
       setPayoutData(monthly.map(v => (v / maxPay) * 100));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'withdrawals'));
-
-    return () => {
-      unsubPayments();
-      unsubWithdrawals();
-    };
+    }).catch((err) => handleFirestoreError(err, OperationType.LIST, 'withdrawals'));
   }, []);
 
   return (
@@ -4483,18 +4484,17 @@ function SupportManager() {
   const [replyText, setReplyText] = useState('');
 
   useEffect(() => {
-    const unsubUsers = onSnapshot(collection(db, 'users'), (snap) => {
+    // One-time loads, not live listeners - see the note on the same pattern in UsersManager.
+    // The currently-open conversation (selectedUser) still gets live messages below.
+    getDocs(collection(db, 'users')).then((snap) => {
        setUsers(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'users'));
+    }).catch((err) => handleFirestoreError(err, OperationType.LIST, 'users'));
 
-    const unsubChats = onSnapshot(collection(db, 'chats'), (snap) => {
+    getDocs(collection(db, 'chats')).then((snap) => {
       setChats(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'chats'));
+    }).catch((err) => handleFirestoreError(err, OperationType.LIST, 'chats'));
 
-    return () => {
-      unsubUsers();
-      unsubChats();
-    };
+    return () => {};
   }, []);
 
   const threads = chats.map(chat => {
@@ -4678,10 +4678,12 @@ function WithdrawalsManager({ requestClearance }: { requestClearance: any }) {
   const [loading, setLoading] = useState<string | null>(null);
 
   useEffect(() => {
+    // One-time load, not a live listener - see the note on the same pattern in UsersManager.
+    // Switching away from this tab and back re-syncs the list.
     const q = query(collection(db, 'withdrawals'), orderBy('createdAt', 'desc'));
-    return onSnapshot(q, (snap) => {
+    getDocs(q).then((snap) => {
       setWithdrawals(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'withdrawals'));
+    }).catch((err) => handleFirestoreError(err, OperationType.LIST, 'withdrawals'));
   }, []);
 
   const approveWithdrawal = async (withdrawal: any) => {
@@ -4713,11 +4715,15 @@ function WithdrawalsManager({ requestClearance }: { requestClearance: any }) {
           throw new Error(result.error || result.details || 'Payout failed');
         }
 
+        const processedAt = new Date().toISOString();
         await updateDoc(doc(db, 'withdrawals', withdrawal.id), {
           status: 'success',
-          processedAt: new Date().toISOString(),
+          processedAt,
           paystackResponse: result
         });
+        // No live listener on this list anymore (see the effect above), so reflect the
+        // change locally instead of waiting for a manual refresh.
+        setWithdrawals(prev => prev.map(w => w.id === withdrawal.id ? { ...w, status: 'success', processedAt, paystackResponse: result } : w));
 
         if (result.isManual) {
            alert('International withdrawal marked as success. Please ensure you manually transfer the funds via their requested method.');
@@ -4727,12 +4733,14 @@ function WithdrawalsManager({ requestClearance }: { requestClearance: any }) {
       } catch (err: any) {
         console.error(err);
         alert('Withdrawal failed: ' + err.message);
-        
+
+        const processedAt = new Date().toISOString();
         await updateDoc(doc(db, 'withdrawals', withdrawal.id), {
           status: 'failed',
           error: err.message,
-          processedAt: new Date().toISOString()
+          processedAt
         });
+        setWithdrawals(prev => prev.map(w => w.id === withdrawal.id ? { ...w, status: 'failed', error: err.message, processedAt } : w));
       } finally {
         setLoading(null);
       }
