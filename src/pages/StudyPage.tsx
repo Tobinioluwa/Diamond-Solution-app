@@ -5,7 +5,7 @@ import { db, auth } from '../lib/firebase';
 import { ChevronLeft, CheckCircle, ArrowRight, ArrowLeft, Trophy, RotateCcw, XCircle, Info, Lock, BookOpen, Sparkles, Play } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { handleFirestoreError, OperationType } from '../lib/firebaseUtils';
-import { cn } from '../lib/utils';
+import { cn, formatFormattedText } from '../lib/utils';
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 import axios from 'axios';
@@ -664,6 +664,7 @@ export default function StudyPage() {
   const logStudyActivity = async (question: any, selectedAns: string | null, isCorrect: boolean) => {
     if (!user || !id || !question) return;
     try {
+      const isApp = question.type === 'application' || course?.questionType === 'application' || course?.level === 'Application Questions';
       // Clean data to prevent undefined values which crash Firestore addDoc calls
       const logData = {
         userId: user.uid,
@@ -674,9 +675,10 @@ export default function StudyPage() {
         options: Array.isArray(question.options) ? question.options : [],
         selectedAnswer: selectedAns !== undefined ? selectedAns : null,
         correctAnswer: typeof question.correctAnswer === 'number' ? question.correctAnswer : null,
-        isCorrect: !!isCorrect,
+        isCorrect: isApp ? true : !!isCorrect,
         explanation: question.explanation || question.answerText || '',
-        type: question.type || 'mcq',
+        answerText: question.answerText || question.explanation || '',
+        type: isApp ? 'application' : (question.type || 'mcq'),
         timestamp: new Date().toISOString()
       };
       await addDoc(collection(db, 'activityLogs'), logData);
@@ -1262,8 +1264,8 @@ export default function StudyPage() {
           >
             <div className="card-luxury p-8 sm:p-10 bg-white border border-[#D8E3FF] shadow-xs rounded-3xl">
               <span className="text-[9px] font-black text-text-3 uppercase tracking-[0.4em] mb-4 block">{t('study.archiveQuery')} • {current.category || 'MCQ'}</span>
-              <p className="text-xl md:text-2xl font-serif font-black text-text-1 leading-relaxed whitespace-pre-wrap">
-                {currentQuestionText}
+              <p className="text-xl md:text-2xl font-serif font-black text-text-1 leading-relaxed whitespace-pre-wrap font-sans">
+                {formatFormattedText(currentQuestionText)}
               </p>
             </div>
 
@@ -1283,8 +1285,8 @@ export default function StudyPage() {
                   ) : (
                     <div className="p-8 bg-[#0B1E3D] border border-[#1E3B6E] rounded-3xl shadow-lg shadow-[#0B1E3D]/10">
                       <span className="text-[10px] font-black text-[#F3C644] uppercase tracking-widest block mb-4">Expected Response provided by System</span>
-                      <p className="text-sm md:text-base text-[#F1F5F9] font-medium leading-relaxed whitespace-pre-wrap">
-                        {current.answerText || current.explanation || 'No expected answer text provided.'}
+                      <p className="text-sm md:text-base text-[#F1F5F9] font-medium leading-relaxed whitespace-pre-wrap font-sans">
+                        {formatFormattedText(current.answerText || current.explanation || 'No expected answer text provided.')}
                       </p>
                     </div>
                   )}
@@ -1319,7 +1321,7 @@ export default function StudyPage() {
                       )}>
                         {String.fromCharCode(65 + idx)}
                       </div>
-                      <span className="text-base font-semibold flex-1 leading-snug text-black whitespace-pre-wrap">{option}</span>
+                      <span className="text-base font-semibold flex-1 leading-snug text-black whitespace-pre-wrap font-sans">{formatFormattedText(option)}</span>
                       {isSubmitted && (isCorrect ? <CheckCircle className="w-6 h-6 ml-2 text-[#1B3FA0]" /> : isSelected && <XCircle className="w-6 h-6 ml-2 text-red-500" />)}
                     </button>
                   );
@@ -1337,8 +1339,8 @@ export default function StudyPage() {
                    <Info className="w-4.5 h-4.5 text-[#F3C644]" />
                    <h4 className="text-[10px] font-black text-[#F3C644] uppercase tracking-[0.3em]">{t('study.institutionalSynthesis')}</h4>
                 </div>
-                <p className="text-[#F1F5F9] font-medium leading-relaxed text-sm sm:text-base selection:bg-[#F3C644] selection:text-[#0B1E3D] whitespace-pre-wrap">
-                  {currentExplanation}
+                <p className="text-[#F1F5F9] font-medium leading-relaxed text-sm sm:text-base selection:bg-[#F3C644] selection:text-[#0B1E3D] whitespace-pre-wrap font-sans">
+                  {formatFormattedText(currentExplanation)}
                 </p>
               </motion.div>
             )}

@@ -17,10 +17,11 @@ import {
   Clock,
   Filter,
   Check,
-  X
+  X,
+  FileText
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { cn } from '../lib/utils';
+import { cn, formatFormattedText } from '../lib/utils';
 
 interface LogItem {
   id: string;
@@ -34,6 +35,7 @@ interface LogItem {
   correctAnswer: number | null;
   isCorrect: boolean;
   explanation: string;
+  answerText?: string;
   type: string;
   timestamp: string;
 }
@@ -99,11 +101,11 @@ export default function ActivityLog() {
     let result = [...logs];
 
     if (statusFilter === 'correct') {
-      result = result.filter(log => log.isCorrect);
+      result = result.filter(log => log.isCorrect || log.type === 'application');
     } else if (statusFilter === 'incorrect') {
-      result = result.filter(log => !log.isCorrect && log.selectedAnswer !== null);
+      result = result.filter(log => !log.isCorrect && log.selectedAnswer !== null && log.type !== 'application');
     } else if (statusFilter === 'skipped') {
-      result = result.filter(log => log.selectedAnswer === null);
+      result = result.filter(log => !log.isCorrect && log.selectedAnswer === null && log.type !== 'application');
     }
 
     setFilteredLogs(result);
@@ -151,16 +153,20 @@ export default function ActivityLog() {
           </div>
 
           {/* Stats quick overview */}
-          <div className="flex gap-4">
-            <div className="px-4 py-2 bg-blue-500/10 border border-blue-500/20 rounded-xl text-center min-w-[70px]">
+          <div className="flex flex-wrap gap-3">
+            <div className="px-3.5 py-2 bg-blue-500/10 border border-blue-500/20 rounded-xl text-center min-w-[65px]">
               <span className="text-[8px] font-black text-blue-400 uppercase tracking-widest block mb-0.5">Correct</span>
-              <span className="text-lg font-serif font-black text-blue-400">{logs.filter(l => l.isCorrect).length}</span>
+              <span className="text-lg font-serif font-black text-blue-400">{logs.filter(l => l.isCorrect && l.type !== 'application').length}</span>
             </div>
-            <div className="px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-xl text-center min-w-[70px]">
+            <div className="px-3.5 py-2 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-center min-w-[65px]">
+              <span className="text-[8px] font-black text-emerald-400 uppercase tracking-widest block mb-0.5">Applied</span>
+              <span className="text-lg font-serif font-black text-emerald-400">{logs.filter(l => l.type === 'application' || (!l.options || l.options.length === 0)).length}</span>
+            </div>
+            <div className="px-3.5 py-2 bg-red-500/10 border border-red-500/20 rounded-xl text-center min-w-[65px]">
               <span className="text-[8px] font-black text-red-400 uppercase tracking-widest block mb-0.5">Wrong</span>
-              <span className="text-lg font-serif font-black text-red-400">{logs.filter(l => !l.isCorrect && l.selectedAnswer !== null).length}</span>
+              <span className="text-lg font-serif font-black text-red-400">{logs.filter(l => !l.isCorrect && l.selectedAnswer !== null && l.type !== 'application').length}</span>
             </div>
-            <div className="px-4 py-2 bg-gold/10 border border-gold/20 rounded-xl text-center min-w-[70px]">
+            <div className="px-3.5 py-2 bg-gold/10 border border-gold/20 rounded-xl text-center min-w-[65px]">
               <span className="text-[8px] font-black text-gold uppercase tracking-widest block mb-0.5">Total</span>
               <span className="text-lg font-serif font-black text-gold">{logs.length}</span>
             </div>
@@ -184,8 +190,8 @@ export default function ActivityLog() {
                   : "bg-navy-high border-gold/10 text-text-3 hover:text-text-1 hover:border-gold/30"
               )}
             >
-              {status === 'all' && 'All Answers'}
-              {status === 'correct' && 'Correct'}
+              {status === 'all' && 'All Queries'}
+              {status === 'correct' && 'Correct / Applied'}
               {status === 'incorrect' && 'Incorrect'}
               {status === 'skipped' && 'Skipped'}
             </button>
@@ -222,18 +228,23 @@ export default function ActivityLog() {
           <div className="space-y-4">
             {filteredLogs.map((log) => {
               const isExpanded = expandedLogId === log.id;
-              const isSkipped = log.selectedAnswer === null;
+              const isApplication = log.type === 'application' || (!log.options || log.options.length === 0);
+              const isSkipped = !isApplication && log.selectedAnswer === null;
+              const formattedQuestion = formatFormattedText(log.questionText);
+              const formattedAnswer = formatFormattedText(log.answerText || log.explanation);
               
               return (
                 <div 
                   key={log.id} 
                   className={cn(
                     "card-luxury overflow-hidden transition-all duration-300 border bg-navy-mid/40 hover:border-gold/30",
-                    log.isCorrect 
-                      ? "border-blue-500/10 hover:border-blue-500/30" 
-                      : isSkipped 
-                        ? "border-gold/10 hover:border-gold/30" 
-                        : "border-red-500/10 hover:border-red-500/30"
+                    isApplication
+                      ? "border-emerald-500/20 hover:border-emerald-500/40"
+                      : log.isCorrect 
+                        ? "border-blue-500/10 hover:border-blue-500/30" 
+                        : isSkipped 
+                          ? "border-gold/10 hover:border-gold/30" 
+                          : "border-red-500/10 hover:border-red-500/30"
                   )}
                 >
                   {/* Collapsed view header */}
@@ -246,27 +257,41 @@ export default function ActivityLog() {
                         <span className="text-[9px] font-black bg-navy-high border border-gold/10 text-gold px-2.5 py-1 rounded-md uppercase tracking-wider font-mono">
                           {log.courseTitle}
                         </span>
+                        {isApplication ? (
+                          <span className="text-[9px] font-black bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 px-2.5 py-1 rounded-md uppercase tracking-wider flex items-center gap-1 font-mono">
+                            <FileText className="w-2.5 h-2.5" />
+                            Application Question
+                          </span>
+                        ) : (
+                          <span className="text-[9px] font-black bg-blue-500/15 border border-blue-500/30 text-blue-400 px-2.5 py-1 rounded-md uppercase tracking-wider font-mono">
+                            Objective MCQ
+                          </span>
+                        )}
                         <div className="flex items-center gap-1.5 text-[9px] font-black text-text-3 uppercase tracking-wider">
                           <Calendar className="w-3 h-3 text-gold/60" />
                           <span>{formatDate(log.timestamp)}</span>
                         </div>
                       </div>
-                      <h4 className="font-serif font-black text-text-1 text-sm md:text-base leading-relaxed line-clamp-2">
-                        {log.questionText}
+                      <h4 className="font-serif font-black text-text-1 text-sm md:text-base leading-relaxed whitespace-pre-wrap line-clamp-2">
+                        {formattedQuestion}
                       </h4>
                     </div>
 
-                    <div className="flex items-center gap-4">
-                      {log.isCorrect ? (
-                        <div className="w-8 h-8 rounded-full bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400">
+                    <div className="flex items-center gap-4 shrink-0">
+                      {isApplication ? (
+                        <div className="w-8 h-8 rounded-full bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400" title="Application Question Completed">
+                          <Check className="w-4 h-4" />
+                        </div>
+                      ) : log.isCorrect ? (
+                        <div className="w-8 h-8 rounded-full bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400" title="Correct Choice">
                           <Check className="w-4 h-4" />
                         </div>
                       ) : isSkipped ? (
-                        <div className="w-8 h-8 rounded-full bg-gold/10 border border-gold/20 flex items-center justify-center text-gold">
+                        <div className="w-8 h-8 rounded-full bg-gold/10 border border-gold/20 flex items-center justify-center text-gold" title="Skipped">
                           <Clock className="w-4 h-4" />
                         </div>
                       ) : (
-                        <div className="w-8 h-8 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center text-red-400">
+                        <div className="w-8 h-8 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center text-red-400" title="Incorrect Choice">
                           <X className="w-4 h-4" />
                         </div>
                       )}
@@ -290,74 +315,113 @@ export default function ActivityLog() {
                         exit={{ height: 0, opacity: 0 }}
                         transition={{ duration: 0.25, ease: 'easeInOut' }}
                       >
-                        <div className="px-6 pb-6 pt-4 border-t border-[#DDE5F5] bg-slate-50/60 space-y-6">
+                        <div className="px-6 pb-6 pt-4 border-t border-[#DDE5F5] bg-slate-50/70 space-y-6">
                           {/* Full Question Text */}
                           <div className="space-y-2">
-                            <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Question</p>
-                            <p className="text-black text-sm md:text-base font-semibold leading-relaxed">
-                              {log.questionText}
-                            </p>
+                            <div className="flex items-center justify-between">
+                              <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-1.5">
+                                {isApplication ? (
+                                  <>
+                                    <FileText className="w-3.5 h-3.5 text-emerald-600" />
+                                    <span>Application Question</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <BookOpen className="w-3.5 h-3.5 text-blue-600" />
+                                    <span>Question</span>
+                                  </>
+                                )}
+                              </p>
+                              {isApplication && (
+                                <span className="text-[9px] font-black uppercase tracking-wider bg-blue-50 text-blue-700 border border-blue-200 px-2.5 py-0.5 rounded-full">
+                                  Bulk CSV Spacing Preserved
+                                </span>
+                              )}
+                            </div>
+                            <div className="p-5 md:p-6 rounded-2xl bg-white border border-[#D8E3FF] text-slate-900 text-sm md:text-base font-medium leading-relaxed whitespace-pre-wrap font-sans shadow-xs">
+                              {formattedQuestion}
+                            </div>
                           </div>
 
-                          {/* Options list */}
-                          {log.options && log.options.length > 0 && (
-                            <div className="space-y-3">
-                              <p className="text-[9px] font-black text-text-3 uppercase tracking-widest">Options</p>
-                              <div className="grid gap-2">
-                                {log.options.map((option, idx) => {
-                                  const isCorrectOption = idx === log.correctAnswer;
-                                  const isSelectedOption = log.selectedAnswer !== null && parseInt(log.selectedAnswer) === idx;
-                                  
-                                  return (
-                                    <div 
-                                      key={idx}
-                                      className={cn(
-                                        "p-4 rounded-xl text-xs font-bold border transition-colors flex items-center gap-3",
-                                        isCorrectOption 
-                                          ? "bg-[#EEF3FF] border-[#1B3FA0]"
-                                          : isSelectedOption 
-                                            ? "bg-red-50 border-red-500"
-                                            : "bg-white border-[#D8E3FF]"
-                                      )}
-                                    >
-                                      <span className={cn(
-                                        "font-mono text-[10px] w-6 h-6 rounded-lg flex items-center justify-center border font-black uppercase shrink-0",
-                                        isCorrectOption 
-                                          ? "bg-[#1B3FA0] text-white border-[#1B3FA0]"
-                                          : isSelectedOption 
-                                            ? "bg-red-500 text-white border-red-500"
-                                            : "bg-[#EEF3FF] text-slate-700 border-[#D8E3FF]"
-                                      )}>
-                                        {String.fromCharCode(65 + idx)}
-                                      </span>
-                                      <span className="flex-1 text-sm font-semibold text-black leading-snug">{option}</span>
-
-                                      {isCorrectOption && (
-                                        <span className="text-[9px] font-black uppercase tracking-wider bg-[#1B3FA0]/15 text-[#1B3FA0] px-2.5 py-1 rounded-md border border-[#1B3FA0]/30">
-                                          Correct Answer
-                                        </span>
-                                      )}
-                                      {isSelectedOption && !isCorrectOption && (
-                                        <span className="text-[9px] font-black uppercase tracking-wider bg-red-100 text-red-600 px-2.5 py-1 rounded-md border border-red-200">
-                                          Your Choice
-                                        </span>
-                                      )}
-                                    </div>
-                                  );
-                                })}
+                          {/* For Application Questions: Expected Answer / Response Block */}
+                          {isApplication ? (
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2 text-emerald-700 font-bold text-[10px] uppercase tracking-widest">
+                                  <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
+                                  <span>Expected Answer & Solution Benchmark</span>
+                                </div>
+                                <span className="text-[9px] font-black uppercase tracking-wider bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-0.5 rounded-full">
+                                  Formatted Text Preserved
+                                </span>
+                              </div>
+                              <div className="p-6 rounded-2xl bg-[#0B1E3D] border border-[#1E3B6E] text-[#F1F5F9] text-sm md:text-base leading-relaxed whitespace-pre-wrap font-sans font-medium shadow-md shadow-[#0B1E3D]/15 selection:bg-[#F3C644] selection:text-[#0B1E3D]">
+                                {formattedAnswer || 'No expected answer recorded for this question.'}
                               </div>
                             </div>
+                          ) : (
+                            /* Options list for Objective MCQ */
+                            log.options && log.options.length > 0 && (
+                              <div className="space-y-3">
+                                <p className="text-[9px] font-black text-text-3 uppercase tracking-widest">Options</p>
+                                <div className="grid gap-2">
+                                  {log.options.map((option, idx) => {
+                                    const isCorrectOption = idx === log.correctAnswer;
+                                    const isSelectedOption = log.selectedAnswer !== null && parseInt(log.selectedAnswer) === idx;
+                                    
+                                    return (
+                                      <div 
+                                        key={idx}
+                                        className={cn(
+                                          "p-4 rounded-xl text-xs font-bold border transition-colors flex items-center gap-3",
+                                          isCorrectOption 
+                                            ? "bg-[#EEF3FF] border-[#1B3FA0]"
+                                            : isSelectedOption 
+                                              ? "bg-red-50 border-red-500"
+                                              : "bg-white border-[#D8E3FF]"
+                                        )}
+                                      >
+                                        <span className={cn(
+                                          "font-mono text-[10px] w-6 h-6 rounded-lg flex items-center justify-center border font-black uppercase shrink-0",
+                                          isCorrectOption 
+                                            ? "bg-[#1B3FA0] text-white border-[#1B3FA0]"
+                                            : isSelectedOption 
+                                              ? "bg-red-500 text-white border-red-500"
+                                              : "bg-[#EEF3FF] text-slate-700 border-[#D8E3FF]"
+                                        )}>
+                                          {String.fromCharCode(65 + idx)}
+                                        </span>
+                                        <span className="flex-1 text-sm font-semibold text-black leading-snug whitespace-pre-wrap">
+                                          {formatFormattedText(option)}
+                                        </span>
+
+                                        {isCorrectOption && (
+                                          <span className="text-[9px] font-black uppercase tracking-wider bg-[#1B3FA0]/15 text-[#1B3FA0] px-2.5 py-1 rounded-md border border-[#1B3FA0]/30 shrink-0">
+                                            Correct Answer
+                                          </span>
+                                        )}
+                                        {isSelectedOption && !isCorrectOption && (
+                                          <span className="text-[9px] font-black uppercase tracking-wider bg-red-100 text-red-600 px-2.5 py-1 rounded-md border border-red-200 shrink-0">
+                                            Your Choice
+                                          </span>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )
                           )}
 
-                          {/* Explanation block */}
-                          {log.explanation && (
+                          {/* Explanation block for objective questions */}
+                          {!isApplication && log.explanation && (
                             <div className="p-5 rounded-2xl bg-[#0B1E3D] border border-[#1E3B6E] space-y-2 shadow-md shadow-[#0B1E3D]/15">
                               <div className="flex items-center gap-2 text-[#F3C644]">
                                 <HelpCircle className="w-4 h-4" />
                                 <span className="text-[9px] font-black uppercase tracking-widest">Detailed Explanation</span>
                               </div>
-                              <p className="text-[#F1F5F9] text-xs sm:text-sm leading-relaxed font-sans font-medium">
-                                {log.explanation}
+                              <p className="text-[#F1F5F9] text-xs sm:text-sm leading-relaxed font-sans font-medium whitespace-pre-wrap">
+                                {formatFormattedText(log.explanation)}
                               </p>
                             </div>
                           )}
