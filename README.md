@@ -9,12 +9,21 @@ quizzes, a leaderboard, an affiliate/referral program, and an admin back office.
   the same code: `server.ts` starts it as a long-running process (local dev, or any Node
   host) serving the frontend too; `netlify/functions/api.ts` wraps it as a Netlify Function
   for the actual Netlify deployment. See [Deployment](#deployment).
-- **Data**: Cloud Firestore (Native mode), Firebase Auth, Firebase Storage for media.
+- **Data**: Cloud Firestore (Native mode, on a non-default named database — see
+  [Database](#database) below), Firebase Auth. There is **no Firebase Storage usage** despite
+  a storage bucket being provisioned — images are compressed client-side and stored inline as
+  base64 data URIs directly on Firestore documents; see [Database](#database).
 - **Project home**: this app was built in Google AI Studio (`firebase-blueprint.json`,
   `firebase-applet-config.json`, `metadata.json` are AI Studio artifacts) and its Firestore
   database runs on an AI-Studio-provisioned "shared quota" Enterprise-edition instance —
   not a standalone Firebase Spark project. Keep that in mind when reasoning about quota; see
-  [Operational notes](#operational-notes--lessons-learned) below.
+  [Database](#database) and [Operational notes](#operational-notes--lessons-learned) below.
+
+**For a complete page-by-page functional specification** — every screen, every business rule
+(device limits, OTP flows, pricing, the points formula, the full 15-tab admin back office, etc.)
+independent of implementation details — see [FUNCTIONAL_SPEC.md](./FUNCTIONAL_SPEC.md). This
+README covers architecture, data model, security, and deployment; that document covers what
+the product actually does.
 
 ## Getting started
 
@@ -80,11 +89,85 @@ src/
   lib/                        firebase.ts, firebaseUtils.ts, SessionService.ts, biometrics.ts
 ```
 
-## Data model (Firestore collections)
+## Database
+
+### How it was provisioned
+
+This app was scaffolded in **Google AI Studio**, not by running `firebase init` against a
+normal Spark/Blaze project. Three checked-in files are AI Studio's own artifacts, not
+hand-written config:
+
+- `metadata.json` — the AI Studio applet's name/description and declared capabilities
+  (`MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API`, for the `/api/translate` feature).
+- `firebase-applet-config.json` — the public Firebase **client** config AI Studio generated
+  for this applet (see exact values below).
+- `firebase-blueprint.json` — the **data-model blueprint** AI Studio used to scaffold
+  Firestore: a JSON Schema per entity (`User`, `Course`, `StudyContent`, `Payment`,
+  `AffiliateTransaction`, `Message`, `Notification`, `Quote`, `StudyProgress`,
+  `DailyPractice`, `Faculty`, `AdminToken`, `Setting`, `ActivityLog`) plus a
+  `firestore` map of collection path → entity schema. **Treat this as a historical starting
+  point, not current truth** — the actual code has since diverged from it in places (e.g. the
+  blueprint's `Payment.status` enum is `pending/completed/failed`, but the real app, and
+  `firestore.rules`, use `pending/success/failed`; the blueprint has no `dept_name`,
+  `dept_pay_*` doc-ID convention, `type`, `purpose`, or `reference` fields on `Payment`, all of
+  which the real payment-verification code depends on). When the blueprint and this README
+  disagree, this README (and the actual `firestore.rules`/`server-app.ts` code) win.
+
+### Project & database identifiers
+
+From `firebase-applet-config.json`:
+
+| Field | Value |
+|---|---|
+| `projectId` | `diamond-learning-app` |
+| `authDomain` | `diamond-learning-app.firebaseapp.com` |
+| `storageBucket` | `diamond-learning-app.firebasestorage.app` |
+| `firestoreDatabaseId` | `ai-studio-diamondsolution-33da16c2-7770-4912-b890-825180592a55` |
+
+**The `firestoreDatabaseId` is not `(default)`.** Firestore supports multiple named databases
+per GCP project, and AI Studio provisioned this app a dedicated, non-default, Enterprise-edition
+database under that long generated name rather than using the project's default database. This
+has real consequences anywhere the Firestore SDK is initialized:
+
+- **Client** (`src/lib/firebase.ts`): `initializeFirestore(app, {experimentalForceLongPolling:
+  true}, firebaseConfig.firestoreDatabaseId)` — the database ID is passed explicitly as the
+  third argument. `experimentalForceLongPolling: true` is also set deliberately (works around
+  environments, like AI Studio's own iframe preview, that block the WebChannel streaming
+  transport Firestore prefers).
+- **Server / Admin SDK** (`server-app.ts`'s `getFirestore()`): explicitly calls
+  `getFirestoreSDK(app, databaseId)` whenever `firebase-applet-config.json`'s
+  `firestoreDatabaseId` isn't `"(default)"` — the code comment states this plainly: *"In AI
+  Studio, enterprise databases must be explicitly targeted by ID."* Forgetting this (e.g. by
+  copy-pasting a generic Admin SDK snippet that calls plain `getFirestore(app)`) silently
+  targets the wrong (empty) default database instead of erroring.
+- There is **no `firebase.json`/`.firebaserc` in this repo** — the Firebase CLI has never been
+  configured for this project here, which is also why rule deployment is a manual Console step
+  (see [Deploying rule changes](#security-model) below) rather than `firebase deploy`.
+
+**Images are stored as base64, not Firebase Storage** — despite a `storageBucket` existing in
+the client config (and the bucket presumably being provisioned), the app never actually uses
+Firebase Storage for user-facing images. `src/lib/imageUtils.ts`'s `compressImage()` resizes
+and re-encodes images client-side into a WebP (JPEG-fallback) **data URI**, deliberately kept
+under ~50KB, and every image-bearing document (department pictures, course pictures, admin
+`ImageUploader` usages) stores that data URI **inline on the Firestore document itself**. If a
+rebuild wants real object storage, that's a deliberate architecture change, not a bug fix.
+
+### Admin SDK credentials
+
+`getFirestore()` in `server-app.ts` resolves credentials in this order:
+1. **`FIREBASE_SERVICE_ACCOUNT_KEY`** env var (the full JSON of a downloaded service-account
+   key, as one string) — required on any host without ambient Google Cloud credentials, e.g.
+   **Netlify Functions**, since they run on AWS, not GCP. See
+   [Deployment](#deployment) for how to generate and set this.
+2. Otherwise, **Application Default Credentials** (`gcloud auth application-default login`
+   locally, or the ambient identity on a GCP-hosted platform) — no service-account JSON is
+   checked into this repo.
+
+### Firestore collections
 
 | Collection | Shape / purpose |
 |---|---|
-| `users/{uid}` | Profile, `role` (`student`/`moderator`/`admin`), balance, affiliate status, suspension state, session token. See `firebase-blueprint.json` for the full schema. |
+| `users/{uid}` | Profile, `role` (`student`/`moderator`/`admin`), balance, affiliate status, suspension state, session token. See `firebase-blueprint.json` for a (partially stale) schema reference, and `isValidUser()` in `firestore.rules` for the fields actually validated. |
 | `dailyPractice/{uid}_{yyyy-mm-dd}` | One doc per user per day: `attempted`, `correct`, `studyDuration` (seconds). Written by `StudyPage.tsx` while a user practices; also the source for the leaderboard and the admin "Most Active Scholars" analytics. |
 | `login_events/{autoId}` | One small doc per sign-in — `{ uid, timestamp, dateKey, hour }` — written by `SessionService.startSession()`. Powers the admin "visit frequency / peak hours" charts. Read-only to admins, write-only (own doc) to the signed-in user. |
 | `payments/{id}` | Course/reactivation payments (Paystack). Client-writable in neither case - only the server writes `status: 'success'` here, via the Admin SDK, after independently verifying the transaction. See [Payment & access model](#payment--access-model) below. |
@@ -99,6 +182,43 @@ src/
 | `system_logs/{id}` | Server-side audit trail (OTP dispatch, admin user deletion, etc.). |
 | `otp_codes/{id}`, `user_sessions/{uid}` | OTP verification and session/device bookkeeping. |
 | `settings/{id}` | Global app settings (public read, admin write). |
+| `admin_tokens/{id}` | Short-lived (10 min) OTP tokens backing the admin dashboard's "Security Clearance" flow (§20.2 of [FUNCTIONAL_SPEC.md](./FUNCTIONAL_SPEC.md)). Admin-only read/write. |
+
+**No `firestore.indexes.json` is checked in** — every query in the app is written to need only
+a single-field index (which Firestore creates automatically) or a composite the SDK will
+complain about on first run; there's no indexes file to deploy alongside the rules.
+
+### Rules structure (`firestore.rules`)
+
+The file is organized top-to-bottom as:
+1. A **global safety net** (`match /{document=**} { allow read, write: if false; }`) — every
+   collection below must explicitly re-open access; nothing is readable/writable by accident
+   through an unmatched path.
+2. **Global helper functions** — `isSignedIn()`, `isOwner(userId)`, `incoming()`/`existing()`
+   (shorthand for `request.resource.data`/`resource.data`), `isSuspended()` (reads the
+   caller's own `users/{uid}.status`), and `isAdmin()` (the three-way check described in
+   [Roles & admin access](#roles--admin-access) below).
+3. **Validation "blueprints"** — `isValidUser()`, `isValidPayment()`, `isValidWithdrawal()`,
+   `isValidPractice()`, `isValidStudyProgress()`, `isValidActivityLog()` — per-collection
+   shape/ownership/enum checks applied inside the actual `allow create/update` rules.
+4. **Per-collection rules**, one `match` block per top-level collection (plus the `courses/{id}/
+   content/{id}` subcollection's own nested block for the paywall check).
+
+See [Security model](#security-model) below for the specific invariants this enforces (who can
+set `role`/`balance`/`status`, why `payments`/`affiliates` are server-write-only, etc.) and for
+how to actually publish an edited rules file to the live database.
+
+### Security test suite (`security_spec.md`)
+
+A standing "Dirty Dozen" of adversarial payloads the rules are expected to reject, used as a
+manual regression checklist after any rules edit — e.g. *"update `/users/{uid}` with `{role:
+"admin"}`" → expect `PERMISSION_DENIED`*, *"create `/withdrawals/{id}` with `{status:
+"approved"}`" → expect `PERMISSION_DENIED`*, *"list `/users`" → expect `PERMISSION_DENIED`
+(only own doc/referrals should ever be listable)*. The file also states 5 plain-English data
+invariants (role/balance/affiliateStatus/suspension/withdrawal-status can only move in
+sanctioned directions) that the Dirty Dozen payloads exist to verify. Re-run this checklist by
+hand (there's no automated rules-emulator test runner wired up) any time `firestore.rules`
+changes.
 
 ## Roles & admin access
 
