@@ -16,6 +16,12 @@ quizzes, a leaderboard, an affiliate/referral program, and an admin back office.
   not a standalone Firebase Spark project. Keep that in mind when reasoning about quota; see
   [Operational notes](#operational-notes--lessons-learned) below.
 
+**For a complete page-by-page functional specification** — every screen, every business rule
+(device limits, OTP flows, pricing, the points formula, the full 15-tab admin back office, etc.)
+independent of implementation details — see [FUNCTIONAL_SPEC.md](./FUNCTIONAL_SPEC.md). This
+README covers architecture, data model, security, and deployment; that document covers what
+the product actually does.
+
 ## Getting started
 
 ```bash
